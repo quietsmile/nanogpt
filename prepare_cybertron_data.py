@@ -89,15 +89,15 @@ def load_per_dataset_indices(dataset_desc):
 
 
 def open_indexed_dataset(path):
-    """Open a megatron IndexedDataset."""
+    """Open a megatron IndexedDataset with mmap for OS-cached access (no DirectIO)."""
     from megatron.core.datasets.indexed_dataset import IndexedDataset
-    return IndexedDataset(path)
+    return IndexedDataset(path, mmap=True)
 
 
-def get_sample_tokens_cached(doc_cache, doc_idx, sample_idx, actual_sample_id, seq_len):
-    """Extract seq_len tokens for one sample using a pre-loaded document cache.
+def get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_sample_id, seq_len):
+    """Extract seq_len tokens for one sample.
 
-    doc_cache: dict mapping real_doc_id → numpy token array (uint16)
+    indexed_ds: mmap-backed IndexedDataset (fast page-cached access)
     doc_idx: document_index array (doc_index → real_doc_id)
     sample_idx: sample_index array (actual_id → (doc_index_beg, offset))
     """
@@ -106,14 +106,14 @@ def get_sample_tokens_cached(doc_cache, doc_idx, sample_idx, actual_sample_id, s
 
     if doc_index_beg == doc_index_end:
         real_doc_id = int(doc_idx[int(doc_index_beg)])
-        doc = doc_cache[real_doc_id]
+        doc = indexed_ds.get(real_doc_id)
         tokens = doc[int(offset_start):int(offset_start) + seq_len]
     else:
         real_doc_id = int(doc_idx[int(doc_index_beg)])
-        tokens = list(doc_cache[real_doc_id][int(offset_start):])
+        tokens = list(indexed_ds.get(real_doc_id)[int(offset_start):])
         for di in range(int(doc_index_beg) + 1, int(doc_index_end) + 1):
             real_doc_id = int(doc_idx[di])
-            doc = doc_cache[real_doc_id]
+            doc = indexed_ds.get(real_doc_id)
             if di < int(doc_index_end):
                 tokens.extend(doc)
             else:
@@ -198,31 +198,17 @@ def extract_train_data(n_samples, out_path):
         sample_idx  = per_ds_sample[ds_id]
         indexed_ds  = per_ds_indexed[ds_id]
 
-        # Compute (actual_id, blended_idx) pairs
+        # Compute (actual_id, blended_idx) pairs and sort by actual_id
+        # (ensures sequential doc_index access in the mmap'd .bin file)
         pairs = [(int(shuffle_idx[int(sample_index[i])]), i) for i in blended_idxs]
-        pairs.sort()  # sort by actual_id → sequential doc_index traversal
+        pairs.sort()
 
-        # Collect all real_doc_ids needed for this dataset
-        needed_real_doc_ids = set()
-        for actual_id, _ in pairs:
-            di_beg = int(sample_idx[actual_id][0])
-            di_end = int(sample_idx[actual_id + 1][0])
-            for di in range(di_beg, di_end + 1):
-                needed_real_doc_ids.add(int(doc_idx[di]))
-
-        # Pre-load all needed documents in sorted doc_id order (sequential .bin access)
-        print(f"  Dataset {ds_id}: {len(pairs):,} samples, "
-              f"{len(needed_real_doc_ids):,} docs to load...", flush=True)
-        doc_cache = {}
-        for real_doc_id in sorted(needed_real_doc_ids):
-            doc_cache[real_doc_id] = indexed_ds.get(real_doc_id).astype(np.uint16)
-
+        print(f"  Dataset {ds_id}: {len(pairs):,} samples...", flush=True)
         for actual_id, i in pairs:
-            tokens = get_sample_tokens_cached(doc_cache, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
+            tokens = get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
             out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
             written += 1
-
-        del doc_cache  # free memory
+        print(f"    done ({ds_id})", flush=True)
 
     out.flush()
     print(f"Done. Wrote {written - skipped:,}/{n_samples:,} samples, skipped {skipped:,}")
