@@ -130,6 +130,50 @@ def get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_sample_id, 
     return tokens.astype(np.uint16)
 
 
+def _extract_dataset_worker(args):
+    """Top-level worker for multiprocessing: extracts all samples for one dataset.
+
+    Must be at module level so it's picklable.
+    Each worker independently loads its own indices and IndexedDataset handle.
+    Writes directly to shared output memmap (non-overlapping regions → safe).
+    """
+    import sys
+    sys.path.insert(0, MEGATRON_PATH)
+
+    ds_id        = args['ds_id']
+    blended_idxs = args['blended_idxs']
+    ds_desc      = args['ds_desc']
+    out_path     = args['out_path']
+    n_total      = args['n_samples']
+
+    # Load indices for this dataset
+    try:
+        doc_idx, shuffle_idx, sample_idx = load_per_dataset_indices(ds_desc)
+        indexed_ds = open_indexed_dataset(ds_desc['dataset_path'])
+    except Exception as e:
+        return ds_id, 0, len(blended_idxs)
+
+    # Load blended sample_index for this dataset's samples
+    dataset_si = np.load(
+        f'{DATA_CACHE_PATH}/{BLENDED_HASH}-BlendedDataset-train-dataset_sample_index.npy',
+        mmap_mode='r'
+    )
+
+    # Compute (actual_id, blended_idx) pairs sorted by actual_id
+    pairs = [(int(shuffle_idx[int(dataset_si[i])]), i) for i in blended_idxs]
+    pairs.sort()
+
+    # Open output memmap for writing
+    out = np.memmap(out_path, dtype=np.uint16, mode='r+', shape=(n_total * SEQ_LENGTH,))
+
+    for actual_id, i in pairs:
+        tokens = get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
+        out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
+    out.flush()
+
+    return ds_id, len(pairs), 0
+
+
 def extract_train_data(n_samples, out_path):
     """Extract n_samples training samples in cybertron's exact order."""
     print("Loading BlendedDataset indices...")
@@ -141,32 +185,25 @@ def extract_train_data(n_samples, out_path):
     datasets = desc['datasets']
     print(f"  Num sub-datasets: {len(datasets)}")
 
-    # Pre-load per-dataset indices for all needed datasets
-    print("Loading per-dataset indices...")
-    per_ds_doc    = {}
-    per_ds_shuffle = {}
-    per_ds_sample  = {}
-    per_ds_indexed = {}
-
-    # Only load datasets that appear in the first n_samples
+    # Quick check which datasets are available (without loading all data)
     needed_ds_ids = set(int(x) for x in dataset_index[:n_samples])
     print(f"  Datasets needed for {n_samples:,} samples: {len(needed_ds_ids)}")
 
+    # Verify index files exist for all needed datasets
+    missing = 0
+    per_ds_shuffle = {}  # track which datasets have cache (None = missing)
     for ds_id in sorted(needed_ds_ids):
         ds_desc = datasets[ds_id]
-        path = ds_desc['dataset_path']
-        try:
-            doc_idx, shuffle_idx, sample_idx = load_per_dataset_indices(ds_desc)
-            per_ds_doc[ds_id]    = doc_idx
-            per_ds_shuffle[ds_id] = shuffle_idx
-            per_ds_sample[ds_id]  = sample_idx
-            per_ds_indexed[ds_id] = open_indexed_dataset(path)
-        except FileNotFoundError as e:
-            print(f"  WARNING: cache miss for dataset {ds_id} ({path}): {e}")
+        h = build_dataset_hash(ds_desc)
+        split = ds_desc['index_split']
+        shuf_path = f'{DATA_CACHE_PATH}/{h}-MCoreGPTDataset-{split}-shuffle_index.npy'
+        if not os.path.exists(shuf_path):
+            print(f"  WARNING: cache miss for dataset {ds_id}: {shuf_path}")
             per_ds_shuffle[ds_id] = None
-
-    n_loaded = sum(1 for v in per_ds_shuffle.values() if v is not None)
-    print(f"  Loaded {n_loaded} datasets successfully")
+            missing += 1
+        else:
+            per_ds_shuffle[ds_id] = True
+    print(f"  {len(needed_ds_ids) - missing} datasets have valid cache ({missing} missing)")
 
     # Group blended sample indices by dataset, then sort by actual_id within each
     # dataset for sequential document access (avoids random IO over shuffled order).
@@ -182,38 +219,39 @@ def extract_train_data(n_samples, out_path):
     out = np.memmap(out_path, dtype=np.uint16, mode='w+', shape=(n_samples * SEQ_LENGTH,))
     print(f"Writing {n_samples:,} samples → {out_path} ({n_samples * SEQ_LENGTH * 2 / 1e9:.2f} GB)")
 
+    import multiprocessing as mp
+
+    # Build args list sorted by sample count (largest first for better load balancing)
+    args_list = []
     skipped = 0
-    written = 0
-    for ds_id in sorted(ds_to_blended_idxs.keys()):
-        blended_idxs = ds_to_blended_idxs[ds_id]
-
+    for ds_id in sorted(ds_to_blended_idxs.keys(),
+                        key=lambda d: len(ds_to_blended_idxs[d]), reverse=True):
         if per_ds_shuffle[ds_id] is None:
-            skipped += len(blended_idxs)
-            written += len(blended_idxs)
-            print(f"  Dataset {ds_id}: SKIPPED {len(blended_idxs):,} samples (cache miss)", flush=True)
+            print(f"  Dataset {ds_id}: SKIPPED (cache miss)", flush=True)
+            skipped += len(ds_to_blended_idxs[ds_id])
             continue
+        args_list.append({
+            'ds_id': ds_id,
+            'blended_idxs': ds_to_blended_idxs[ds_id],
+            'ds_desc': datasets[ds_id],
+            'out_path': out_path,
+            'n_samples': n_samples,
+        })
 
-        doc_idx     = per_ds_doc[ds_id]
-        shuffle_idx = per_ds_shuffle[ds_id]
-        sample_idx  = per_ds_sample[ds_id]
-        indexed_ds  = per_ds_indexed[ds_id]
+    n_workers = min(16, len(args_list))
+    print(f"Processing {len(args_list)} datasets with {n_workers} parallel workers...")
 
-        # Compute (actual_id, blended_idx) pairs and sort by actual_id
-        # (ensures sequential doc_index access in the mmap'd .bin file)
-        pairs = [(int(shuffle_idx[int(sample_index[i])]), i) for i in blended_idxs]
-        pairs.sort()
-
-        print(f"  Dataset {ds_id}: {len(pairs):,} samples...", flush=True)
-        for actual_id, i in pairs:
-            tokens = get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
-            out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
-            written += 1
-        print(f"    done ({ds_id})", flush=True)
+    written = 0
+    with mp.Pool(processes=n_workers) as pool:
+        for ds_id_done, n_written, n_skip in pool.imap_unordered(_extract_dataset_worker, args_list):
+            written += n_written
+            skipped += n_skip
+            print(f"  Dataset {ds_id_done}: done ({n_written:,} samples)", flush=True)
 
     out.flush()
-    print(f"Done. Wrote {written - skipped:,}/{n_samples:,} samples, skipped {skipped:,}")
+    print(f"Done. Wrote {written:,}/{n_samples:,} samples, skipped {skipped:,}")
     if skipped > 0:
-        print(f"WARNING: {skipped} samples were skipped due to cache misses and filled with zeros")
+        print(f"WARNING: {skipped} samples were skipped due to cache misses")
 
 
 def extract_val_data(out_path, n_samples=2000):
