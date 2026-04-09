@@ -94,35 +94,26 @@ def open_indexed_dataset(path):
     return IndexedDataset(path)
 
 
-def get_sample_tokens(indexed_ds, doc_idx, sample_idx, actual_sample_id, seq_len):
-    """Extract seq_len tokens for one sample.
+def get_sample_tokens_cached(doc_cache, doc_idx, sample_idx, actual_sample_id, seq_len):
+    """Extract seq_len tokens for one sample using a pre-loaded document cache.
 
-    In megatron's MCoreGPTDataset:
-      sample_index[actual_id] = (doc_index_beg, doc_index_beg_offset)
-      sample_index[actual_id+1] = (doc_index_end, doc_index_end_offset)
-
-    doc_index_beg/end are indices into document_index (NOT direct doc IDs).
-    document_index[doc_index_beg] gives the actual IndexedDataset doc ID.
-
-    actual_sample_id must already be post-shuffle (i.e., shuffle_index[external_id]).
+    doc_cache: dict mapping real_doc_id → numpy token array (uint16)
+    doc_idx: document_index array (doc_index → real_doc_id)
+    sample_idx: sample_index array (actual_id → (doc_index_beg, offset))
     """
     doc_index_beg, offset_start = sample_idx[actual_sample_id]
     doc_index_end, offset_end   = sample_idx[actual_sample_id + 1]
 
-    tokens = []
     if doc_index_beg == doc_index_end:
-        # Sample is within a single document
         real_doc_id = int(doc_idx[int(doc_index_beg)])
-        doc = indexed_ds.get(real_doc_id)
+        doc = doc_cache[real_doc_id]
         tokens = doc[int(offset_start):int(offset_start) + seq_len]
     else:
-        # Sample spans multiple documents
         real_doc_id = int(doc_idx[int(doc_index_beg)])
-        doc = indexed_ds.get(real_doc_id)
-        tokens = list(doc[int(offset_start):])
+        tokens = list(doc_cache[real_doc_id][int(offset_start):])
         for di in range(int(doc_index_beg) + 1, int(doc_index_end) + 1):
             real_doc_id = int(doc_idx[di])
-            doc = indexed_ds.get(real_doc_id)
+            doc = doc_cache[real_doc_id]
             if di < int(doc_index_end):
                 tokens.extend(doc)
             else:
@@ -207,15 +198,31 @@ def extract_train_data(n_samples, out_path):
         sample_idx  = per_ds_sample[ds_id]
         indexed_ds  = per_ds_indexed[ds_id]
 
-        # Compute (actual_id, blended_idx) pairs and sort by actual_id for sequential IO
+        # Compute (actual_id, blended_idx) pairs
         pairs = [(int(shuffle_idx[int(sample_index[i])]), i) for i in blended_idxs]
-        pairs.sort()  # sort by actual_id → more sequential document access
+        pairs.sort()  # sort by actual_id → sequential doc_index traversal
 
-        print(f"  Dataset {ds_id}: {len(pairs):,} samples", flush=True)
+        # Collect all real_doc_ids needed for this dataset
+        needed_real_doc_ids = set()
+        for actual_id, _ in pairs:
+            di_beg = int(sample_idx[actual_id][0])
+            di_end = int(sample_idx[actual_id + 1][0])
+            for di in range(di_beg, di_end + 1):
+                needed_real_doc_ids.add(int(doc_idx[di]))
+
+        # Pre-load all needed documents in sorted doc_id order (sequential .bin access)
+        print(f"  Dataset {ds_id}: {len(pairs):,} samples, "
+              f"{len(needed_real_doc_ids):,} docs to load...", flush=True)
+        doc_cache = {}
+        for real_doc_id in sorted(needed_real_doc_ids):
+            doc_cache[real_doc_id] = indexed_ds.get(real_doc_id).astype(np.uint16)
+
         for actual_id, i in pairs:
-            tokens = get_sample_tokens(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
+            tokens = get_sample_tokens_cached(doc_cache, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
             out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
             written += 1
+
+        del doc_cache  # free memory
 
     out.flush()
     print(f"Done. Wrote {written - skipped:,}/{n_samples:,} samples, skipped {skipped:,}")
