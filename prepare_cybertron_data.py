@@ -91,17 +91,17 @@ def open_indexed_dataset(path):
     return IndexedDataset(path)
 
 
-def get_sample_tokens(indexed_ds, sample_idx, shuffled_sample_id, seq_len):
+def get_sample_tokens(indexed_ds, sample_idx, actual_sample_id, seq_len):
     """Extract seq_len tokens for one sample.
 
     The megatron sample_index has shape (N+1, 2) where each row is
     (document_id, offset_within_document). Sample i spans from
-    sample_idx[shuffled_id] to sample_idx[shuffled_id + 1].
+    sample_idx[actual_sample_id] to sample_idx[actual_sample_id + 1].
+
+    actual_sample_id must already be post-shuffle (i.e., shuffle_index[external_id]).
     """
-    # The shuffle_index maps blended-sample-id → per-dataset-sample-id
-    # The sample_index maps per-dataset-sample-id → (doc_id, start_offset)
-    doc_id_start, offset_start = sample_idx[shuffled_sample_id]
-    doc_id_end,   offset_end   = sample_idx[shuffled_sample_id + 1]
+    doc_id_start, offset_start = sample_idx[actual_sample_id]
+    doc_id_end,   offset_end   = sample_idx[actual_sample_id + 1]
 
     tokens = []
     if doc_id_start == doc_id_end:
@@ -187,11 +187,11 @@ def extract_train_data(n_samples, out_path):
         sample_idx  = per_ds_sample[ds_id]
         indexed_ds  = per_ds_indexed[ds_id]
 
-        # The BlendedDataset's sample_index[i] is already the shuffled index into
-        # per-dataset samples. We use it directly.
-        shuffled_id = per_ds_sample_id
+        # BlendedDataset stores the external idx; MCoreGPTDataset.__getitem__ applies
+        # shuffle_index internally (line 303 of gpt_dataset.py). We must replicate that.
+        actual_id = int(shuffle_idx[per_ds_sample_id])
 
-        tokens = get_sample_tokens(indexed_ds, sample_idx, shuffled_id, SEQ_LENGTH)
+        tokens = get_sample_tokens(indexed_ds, sample_idx, actual_id, SEQ_LENGTH)
         out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
 
     out.flush()
