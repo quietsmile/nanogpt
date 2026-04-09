@@ -185,9 +185,16 @@ def init_distributed():
 
 
 class _MinimalTokenizer:
-    """Minimal tokenizer stub that satisfies megatron's GPTDatasetConfig requirement."""
+    """Minimal tokenizer stub matching the unique_identifiers used in the existing cache.
+
+    The cache was built with HFTokenizer("HFTokenizer"), which produces:
+      unique_identifiers = {"class": "HFTokenizer", "tokenizer_path": ["HFTokenizer"]}
+    We must match this exactly to hit the cache.
+    """
     eod = EOD_TOKEN_ID
-    pad = EOD_TOKEN_ID
+    pad = 151644  # Qwen <|endoftext|> pad token
+    # Must match what cybertron used to build the cache
+    unique_identifiers = {'class': 'HFTokenizer', 'tokenizer_path': ['HFTokenizer']}
 
     def tokenize(self, text):
         raise NotImplementedError
