@@ -46,6 +46,7 @@ SEQ_LENGTH     = 8192
 RANDOM_SEED    = 1234   # cybertron default gpt_dataset_seed
 DATA_CACHE_PATH = '/prodcpfs/user/data/save/data/lossalign/data_cache'
 VOCAB_SIZE     = 152064  # Qwen tokenizer padded vocab
+EOD_TOKEN_ID   = 151643  # Qwen <|endoftext|> token id
 
 # Training data: path → (weight, loss_group) from data_pretrain_v3_pai.yaml
 # Abbreviated to just paths+weights here; loss_group is not needed for data extraction
@@ -183,6 +184,18 @@ def init_distributed():
     return dist
 
 
+class _MinimalTokenizer:
+    """Minimal tokenizer stub that satisfies megatron's GPTDatasetConfig requirement."""
+    eod = EOD_TOKEN_ID
+    pad = EOD_TOKEN_ID
+
+    def tokenize(self, text):
+        raise NotImplementedError
+
+    def detokenize(self, tokens):
+        raise NotImplementedError
+
+
 def build_train_dataset(n_train_samples):
     """Build the blended training dataset using cybertron's pipeline."""
     import torch
@@ -205,7 +218,7 @@ def build_train_dataset(n_train_samples):
         blend_per_split=[(paths, weights), None, None],
         split=None,
         path_to_cache=DATA_CACHE_PATH,
-        tokenizer=None,   # not needed for index-building, just for actual sample fetching
+        tokenizer=_MinimalTokenizer(),
         reset_position_ids=False,
         reset_attention_mask=False,
         eod_mask_loss=True,
