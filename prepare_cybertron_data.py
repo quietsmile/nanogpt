@@ -174,7 +174,17 @@ def extract_train_data(n_samples, out_path):
             print(f"  WARNING: cache miss for dataset {ds_id} ({path}): {e}")
             per_ds_shuffle[ds_id] = None
 
-    print(f"  Loaded {sum(1 for v in per_ds_shuffle.values() if v is not None)} datasets successfully")
+    n_loaded = sum(1 for v in per_ds_shuffle.values() if v is not None)
+    print(f"  Loaded {n_loaded} datasets successfully")
+
+    # Group blended sample indices by dataset, then sort by actual_id within each
+    # dataset for sequential document access (avoids random IO over shuffled order).
+    print("Grouping samples by dataset for sequential IO...")
+    from collections import defaultdict
+    ds_to_blended_idxs = defaultdict(list)
+    for i in range(n_samples):
+        ds_id = int(dataset_index[i])
+        ds_to_blended_idxs[ds_id].append(i)
 
     # Write output
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -182,32 +192,33 @@ def extract_train_data(n_samples, out_path):
     print(f"Writing {n_samples:,} samples → {out_path} ({n_samples * SEQ_LENGTH * 2 / 1e9:.2f} GB)")
 
     skipped = 0
-    for i in range(n_samples):
-        if i % 10000 == 0:
-            print(f"  {i:,}/{n_samples:,} ({100*i/n_samples:.1f}%) skipped={skipped}", flush=True)
-
-        ds_id = int(dataset_index[i])
-        per_ds_sample_id = int(sample_index[i])
+    written = 0
+    for ds_id in sorted(ds_to_blended_idxs.keys()):
+        blended_idxs = ds_to_blended_idxs[ds_id]
 
         if per_ds_shuffle[ds_id] is None:
-            # Cache miss: fill with zeros
-            skipped += 1
+            skipped += len(blended_idxs)
+            written += len(blended_idxs)
+            print(f"  Dataset {ds_id}: SKIPPED {len(blended_idxs):,} samples (cache miss)", flush=True)
             continue
 
-        doc_idx    = per_ds_doc[ds_id]
+        doc_idx     = per_ds_doc[ds_id]
         shuffle_idx = per_ds_shuffle[ds_id]
         sample_idx  = per_ds_sample[ds_id]
         indexed_ds  = per_ds_indexed[ds_id]
 
-        # BlendedDataset stores external idx; MCoreGPTDataset.__getitem__ applies
-        # shuffle_index internally (gpt_dataset.py:303). We must replicate that.
-        actual_id = int(shuffle_idx[per_ds_sample_id])
+        # Compute (actual_id, blended_idx) pairs and sort by actual_id for sequential IO
+        pairs = [(int(shuffle_idx[int(sample_index[i])]), i) for i in blended_idxs]
+        pairs.sort()  # sort by actual_id → more sequential document access
 
-        tokens = get_sample_tokens(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
-        out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
+        print(f"  Dataset {ds_id}: {len(pairs):,} samples", flush=True)
+        for actual_id, i in pairs:
+            tokens = get_sample_tokens(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
+            out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
+            written += 1
 
     out.flush()
-    print(f"Done. Wrote {n_samples - skipped:,}/{n_samples:,} samples, skipped {skipped:,}")
+    print(f"Done. Wrote {written - skipped:,}/{n_samples:,} samples, skipped {skipped:,}")
     if skipped > 0:
         print(f"WARNING: {skipped} samples were skipped due to cache misses and filled with zeros")
 
