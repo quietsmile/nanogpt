@@ -71,18 +71,21 @@ def build_dataset_hash(dataset_desc):
 
 
 def load_per_dataset_indices(dataset_desc):
-    """Load per-dataset shuffle_index and sample_index from cache."""
+    """Load per-dataset document_index, shuffle_index, and sample_index from cache."""
     h = build_dataset_hash(dataset_desc)
     cache = DATA_CACHE_PATH
     split = dataset_desc['index_split']
 
+    doc_idx = np.load(
+        f'{cache}/{h}-MCoreGPTDataset-{split}-document_index.npy', mmap_mode='r'
+    )
     shuffle_idx = np.load(
         f'{cache}/{h}-MCoreGPTDataset-{split}-shuffle_index.npy', mmap_mode='r'
     )
     sample_idx = np.load(
         f'{cache}/{h}-MCoreGPTDataset-{split}-sample_index.npy', mmap_mode='r'
     )
-    return shuffle_idx, sample_idx
+    return doc_idx, shuffle_idx, sample_idx
 
 
 def open_indexed_dataset(path):
@@ -91,30 +94,36 @@ def open_indexed_dataset(path):
     return IndexedDataset(path)
 
 
-def get_sample_tokens(indexed_ds, sample_idx, actual_sample_id, seq_len):
+def get_sample_tokens(indexed_ds, doc_idx, sample_idx, actual_sample_id, seq_len):
     """Extract seq_len tokens for one sample.
 
-    The megatron sample_index has shape (N+1, 2) where each row is
-    (document_id, offset_within_document). Sample i spans from
-    sample_idx[actual_sample_id] to sample_idx[actual_sample_id + 1].
+    In megatron's MCoreGPTDataset:
+      sample_index[actual_id] = (doc_index_beg, doc_index_beg_offset)
+      sample_index[actual_id+1] = (doc_index_end, doc_index_end_offset)
+
+    doc_index_beg/end are indices into document_index (NOT direct doc IDs).
+    document_index[doc_index_beg] gives the actual IndexedDataset doc ID.
 
     actual_sample_id must already be post-shuffle (i.e., shuffle_index[external_id]).
     """
-    doc_id_start, offset_start = sample_idx[actual_sample_id]
-    doc_id_end,   offset_end   = sample_idx[actual_sample_id + 1]
+    doc_index_beg, offset_start = sample_idx[actual_sample_id]
+    doc_index_end, offset_end   = sample_idx[actual_sample_id + 1]
 
     tokens = []
-    if doc_id_start == doc_id_end:
+    if doc_index_beg == doc_index_end:
         # Sample is within a single document
-        doc = indexed_ds.get(int(doc_id_start))
+        real_doc_id = int(doc_idx[int(doc_index_beg)])
+        doc = indexed_ds.get(real_doc_id)
         tokens = doc[int(offset_start):int(offset_start) + seq_len]
     else:
         # Sample spans multiple documents
-        doc = indexed_ds.get(int(doc_id_start))
+        real_doc_id = int(doc_idx[int(doc_index_beg)])
+        doc = indexed_ds.get(real_doc_id)
         tokens = list(doc[int(offset_start):])
-        for doc_id in range(doc_id_start + 1, doc_id_end + 1):
-            doc = indexed_ds.get(int(doc_id))
-            if doc_id < doc_id_end:
+        for di in range(int(doc_index_beg) + 1, int(doc_index_end) + 1):
+            real_doc_id = int(doc_idx[di])
+            doc = indexed_ds.get(real_doc_id)
+            if di < int(doc_index_end):
                 tokens.extend(doc)
             else:
                 tokens.extend(doc[:int(offset_end)])
@@ -141,8 +150,9 @@ def extract_train_data(n_samples, out_path):
     datasets = desc['datasets']
     print(f"  Num sub-datasets: {len(datasets)}")
 
-    # Pre-load per-dataset indices (shuffle_index + sample_index) for all 116 datasets
+    # Pre-load per-dataset indices for all needed datasets
     print("Loading per-dataset indices...")
+    per_ds_doc    = {}
     per_ds_shuffle = {}
     per_ds_sample  = {}
     per_ds_indexed = {}
@@ -155,7 +165,8 @@ def extract_train_data(n_samples, out_path):
         ds_desc = datasets[ds_id]
         path = ds_desc['dataset_path']
         try:
-            shuffle_idx, sample_idx = load_per_dataset_indices(ds_desc)
+            doc_idx, shuffle_idx, sample_idx = load_per_dataset_indices(ds_desc)
+            per_ds_doc[ds_id]    = doc_idx
             per_ds_shuffle[ds_id] = shuffle_idx
             per_ds_sample[ds_id]  = sample_idx
             per_ds_indexed[ds_id] = open_indexed_dataset(path)
@@ -183,15 +194,16 @@ def extract_train_data(n_samples, out_path):
             skipped += 1
             continue
 
+        doc_idx    = per_ds_doc[ds_id]
         shuffle_idx = per_ds_shuffle[ds_id]
         sample_idx  = per_ds_sample[ds_id]
         indexed_ds  = per_ds_indexed[ds_id]
 
-        # BlendedDataset stores the external idx; MCoreGPTDataset.__getitem__ applies
-        # shuffle_index internally (line 303 of gpt_dataset.py). We must replicate that.
+        # BlendedDataset stores external idx; MCoreGPTDataset.__getitem__ applies
+        # shuffle_index internally (gpt_dataset.py:303). We must replicate that.
         actual_id = int(shuffle_idx[per_ds_sample_id])
 
-        tokens = get_sample_tokens(indexed_ds, sample_idx, actual_id, SEQ_LENGTH)
+        tokens = get_sample_tokens(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
         out[i * SEQ_LENGTH:(i + 1) * SEQ_LENGTH] = tokens
 
     out.flush()
