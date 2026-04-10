@@ -37,9 +37,10 @@ wandb_run_name = 'cybertron_baseline_198'
 # Data
 # Run `python prepare_cybertron_data.py` first to create train.bin/val.bin
 dataset = 'cybertron_baseline_cybertron'   # suffix '_cybertron' → sequential loading
-gradient_accumulation_steps = 32  # global_batch_size=128 / (micro_batch=4 * 1 gpu)
-                                   # train.py divides by world_size internally → 4 per GPU on 8 GPUs
-batch_size = 4                    # micro batch size (matches cybertron micro_batch_size=4)
+gradient_accumulation_steps = 64  # global_batch_size=128 / (micro_batch=2 * 1 gpu)
+                                   # train.py divides by world_size internally → 8 per GPU on 8 GPUs
+batch_size = 2                    # micro batch size (2 instead of 4 to fit in GPU memory;
+                                   # global batch unchanged: 2 × 64_accum_steps = 128)
 block_size = 8192                 # seq_length
 
 # Model architecture (dense equivalent of scaling_moe_00198)
