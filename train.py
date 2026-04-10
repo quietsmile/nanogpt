@@ -58,6 +58,7 @@ n_embd = 768
 dropout = 0.0
 bias = False
 n_kv_head = None      # None = MHA; integer = GQA kv heads
+kv_channels = None    # per-head dim; None → n_embd // n_head
 use_rope = False
 rotary_base = 10000
 use_rmsnorm = False
@@ -66,6 +67,8 @@ use_swiglu = False
 ffn_hidden_size = None
 tie_embeddings = True
 init_std = 0.02
+qk_layernorm = False  # RMSNorm on Q/K per head before RoPE (cybertron qk_layernorm)
+disable_scaled_init_method = False  # skip 1/sqrt(2*n_layer) scaling for residual projs
 # adamw optimizer
 learning_rate = 6e-4
 max_iters = 600000
@@ -222,10 +225,13 @@ if os.path.exists(meta_path):
 model_args = dict(
     n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
     bias=bias, vocab_size=None, dropout=dropout,
-    n_kv_head=n_kv_head, use_rope=use_rope, rotary_base=rotary_base,
+    n_kv_head=n_kv_head, kv_channels=kv_channels,
+    use_rope=use_rope, rotary_base=rotary_base,
     use_rmsnorm=use_rmsnorm, norm_eps=norm_eps,
     use_swiglu=use_swiglu, ffn_hidden_size=ffn_hidden_size,
     tie_embeddings=tie_embeddings, init_std=init_std,
+    qk_layernorm=qk_layernorm,
+    disable_scaled_init_method=disable_scaled_init_method,
 )
 
 if init_from == 'scratch':
@@ -241,8 +247,9 @@ elif init_from == 'resume':
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size',
-              'n_kv_head', 'use_rope', 'rotary_base', 'use_rmsnorm', 'norm_eps',
-              'use_swiglu', 'ffn_hidden_size', 'tie_embeddings', 'init_std']:
+              'n_kv_head', 'kv_channels', 'use_rope', 'rotary_base', 'use_rmsnorm', 'norm_eps',
+              'use_swiglu', 'ffn_hidden_size', 'tie_embeddings', 'init_std',
+              'qk_layernorm', 'disable_scaled_init_method']:
         model_args[k] = checkpoint_model_args[k]
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)

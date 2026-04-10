@@ -1,6 +1,6 @@
 """
 Full definition of a GPT Language Model, supporting both original GPT-2 style
-and Cybertron-aligned architecture (RMSNorm, RoPE, GQA, SwiGLU).
+and Cybertron-aligned architecture (RMSNorm, RoPE, GQA, SwiGLU, qk_layernorm).
 
 References:
 1) the official GPT-2 TensorFlow implementation released by OpenAI:
@@ -92,7 +92,9 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        self.head_dim = config.n_embd // config.n_head
+
+        # head_dim: use explicit kv_channels if set, else n_embd // n_head
+        self.head_dim = config.kv_channels if config.kv_channels is not None else config.n_embd // config.n_head
 
         # GQA support
         self.n_kv_head = config.n_kv_head if config.n_kv_head is not None else config.n_head
@@ -101,18 +103,31 @@ class CausalSelfAttention(nn.Module):
 
         if config.use_rope:
             # Separate Q, K, V projections for GQA
+            # Q: n_embd → n_head * head_dim
+            # K, V: n_embd → n_kv_head * head_dim
             self.q_proj = nn.Linear(config.n_embd, config.n_head * self.head_dim, bias=config.bias)
             self.k_proj = nn.Linear(config.n_embd, self.n_kv_head * self.head_dim, bias=config.bias)
             self.v_proj = nn.Linear(config.n_embd, self.n_kv_head * self.head_dim, bias=config.bias)
             self.rotary_emb = RotaryEmbedding(
                 self.head_dim, base=config.rotary_base, max_seq_len=config.block_size
             )
+            # qk_layernorm: RMSNorm on Q and K per head, BEFORE RoPE
+            # Applied to shape [B, heads, T, head_dim]
+            if config.qk_layernorm:
+                self.q_layernorm = RMSNorm(self.head_dim, eps=config.norm_eps)
+                self.k_layernorm = RMSNorm(self.head_dim, eps=config.norm_eps)
+            else:
+                self.q_layernorm = None
+                self.k_layernorm = None
         else:
             # Original combined QKV for standard MHA (GPT-2 style)
             assert self.n_kv_head == self.n_head, "GQA requires use_rope=True or matching heads"
             self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+            self.q_layernorm = None
+            self.k_layernorm = None
 
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # Output projection: n_head * head_dim → n_embd
+        self.c_proj = nn.Linear(config.n_head * self.head_dim, config.n_embd, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.use_rope = config.use_rope
@@ -131,6 +146,13 @@ class CausalSelfAttention(nn.Module):
             q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
             k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
             v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+
+            # qk_layernorm: applied before RoPE, matching cybertron's order
+            if self.q_layernorm is not None:
+                q = self.q_layernorm(q)
+            if self.k_layernorm is not None:
+                k = self.k_layernorm(k)
+
             q, k = self.rotary_emb(q, k, seq_len=T)
 
             # Expand KV heads for GQA
@@ -158,7 +180,7 @@ class CausalSelfAttention(nn.Module):
             att = self.attn_dropout(att)
             y = att @ v
 
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
         y = self.resid_dropout(self.c_proj(y))
         return y
 
@@ -240,6 +262,7 @@ class GPTConfig:
 
     # --- Cybertron-style options ---
     n_kv_head: Optional[int] = None  # None = MHA; set to < n_head for GQA
+    kv_channels: Optional[int] = None  # per-head dimension; None → n_embd // n_head
     use_rope: bool = False            # Use RoPE instead of learned position embeddings
     rotary_base: int = 10000          # RoPE base frequency
     use_rmsnorm: bool = False         # Use RMSNorm instead of LayerNorm
@@ -248,6 +271,8 @@ class GPTConfig:
     ffn_hidden_size: Optional[int] = None  # SwiGLU hidden size; defaults to 4*n_embd if None
     tie_embeddings: bool = True       # Tie input and output embeddings (GPT-2 style)
     init_std: float = 0.02            # Weight initialization std
+    qk_layernorm: bool = False        # Apply RMSNorm to Q and K per-head, before RoPE
+    disable_scaled_init_method: bool = False  # If True, skip 1/sqrt(2*n_layer) scaling for residual projs
 
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:
@@ -292,10 +317,12 @@ class GPT(nn.Module):
 
         # Init all weights
         self.apply(self._init_weights)
-        # Apply special scaled init to residual projections, per GPT-2 paper
-        for pn, p in self.named_parameters():
-            if pn.endswith('c_proj.weight') or pn.endswith('down_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=config.init_std / math.sqrt(2 * config.n_layer))
+        # Apply special scaled init to residual projections, per GPT-2 paper.
+        # cybertron sets disable_scaled_init_method=True, so skip this when requested.
+        if not config.disable_scaled_init_method:
+            for pn, p in self.named_parameters():
+                if pn.endswith('c_proj.weight') or pn.endswith('down_proj.weight'):
+                    torch.nn.init.normal_(p, mean=0.0, std=config.init_std / math.sqrt(2 * config.n_layer))
 
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
@@ -427,7 +454,8 @@ class GPT(nn.Module):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
         N = self.get_num_params()
         cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        head_dim = cfg.kv_channels if cfg.kv_channels is not None else cfg.n_embd // cfg.n_head
+        L, H, Q, T = cfg.n_layer, cfg.n_head, head_dim, cfg.block_size
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter

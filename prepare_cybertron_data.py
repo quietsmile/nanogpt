@@ -2,12 +2,18 @@
 Prepare training/validation data for nanogpt by extracting it from cybertron's
 blended megatron dataset cache, preserving the EXACT same data order as cybertron.
 
-This script directly reads the pre-built cache files from the scaling_moe_00196 run
-(PAI job dlc1q9arre48b0kx) rather than rebuilding them. This is fast and exact.
+This script directly reads the pre-built cache files rather than rebuilding them.
 
-Cache info (identified from scaling_moe_00196 training log):
-  BlendedDataset hash: 43adec39b46f5eb95d144361a0db6699
-  Cache path: /prodcpfs/user/data/save/data/lossalign/data_cache
+Cache info:
+  scaling_moe_00196 (PAI: dlc1q9arre48b0kx):
+    BlendedDataset hash: 43adec39b46f5eb95d144361a0db6699
+    Cache path: /prodcpfs/user/data/save/data/lossalign/data_cache
+    Train samples: 479040
+
+  scaling_moe_00198 (PAI: dlc1v93gneqwnrdz):
+    BlendedDataset hash: b98975b5a0b37ed3a7f5437dc5951576
+    Cache path: /prodcpfs/user/data/save/data/data_cache
+    Train samples: 1388416
 
 Output:
   data/cybertron_baseline/train.bin   -- uint16 token array, sequential samples
@@ -15,7 +21,10 @@ Output:
   data/cybertron_baseline/meta.pkl    -- vocab_size=152064
 
 Usage:
+  # For 198 (default):
   python prepare_cybertron_data.py [--n_train_samples N] [--n_val_samples N]
+  # For 196:
+  python prepare_cybertron_data.py --exp 196
 """
 
 import os
@@ -29,10 +38,25 @@ import numpy as np
 MEGATRON_PATH   = '/newcpfs/user/yuchen/llm/megatron_dots3.0_swa'
 sys.path.insert(0, MEGATRON_PATH)
 
-DATA_CACHE_PATH     = '/prodcpfs/user/data/save/data/lossalign/data_cache'
-BLENDED_HASH        = '43adec39b46f5eb95d144361a0db6699'  # from scaling_moe_00196 log
-SEQ_LENGTH          = 8192
-VOCAB_SIZE          = 152064
+# Per-experiment configs
+EXP_CONFIGS = {
+    '196': {
+        'data_cache_path': '/prodcpfs/user/data/save/data/lossalign/data_cache',
+        'blended_hash':    '43adec39b46f5eb95d144361a0db6699',
+        'n_train_samples': 479040,
+    },
+    '198': {
+        'data_cache_path': '/prodcpfs/user/data/save/data/data_cache',
+        'blended_hash':    'b98975b5a0b37ed3a7f5437dc5951576',
+        'n_train_samples': 1388416,
+    },
+}
+
+# Will be set in main() based on --exp argument
+DATA_CACHE_PATH = None
+BLENDED_HASH    = None
+SEQ_LENGTH      = 8192
+VOCAB_SIZE      = 152064
 
 # Validation: Pile_test_5k (megatron indexed dataset)
 VAL_DATA_PATH = '/cpfs/user/wangzerui/cybertron_workspace/datasets/prod_validation_datasets/OOD_Validation/megatron_bins_raw/Pile_test_5k_gpt'
@@ -56,7 +80,9 @@ def load_blended_description():
     """Load the BlendedDataset description to get per-dataset paths and hashes."""
     desc_path = f'{DATA_CACHE_PATH}/{BLENDED_HASH}-BlendedDataset-train-description.txt'
     with open(desc_path) as f:
-        return json.load(f)
+        d = json.load(f)
+    # The blended description wraps datasets in a top-level 'datasets' key
+    return d
 
 
 def build_dataset_hash(dataset_desc):
@@ -290,14 +316,30 @@ def extract_val_data(out_path, n_samples=2000):
 
 
 def main():
+    global DATA_CACHE_PATH, BLENDED_HASH
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n_train_samples', type=int, default=479040,
-                        help='Training samples to extract (default: full 7485-iter run)')
+    parser.add_argument('--exp', type=str, default='198', choices=['196', '198'],
+                        help='Which cybertron experiment to align with (default: 198)')
+    parser.add_argument('--n_train_samples', type=int, default=None,
+                        help='Training samples to extract (default: from exp config)')
     parser.add_argument('--n_val_samples', type=int, default=2000)
     parser.add_argument('--out_dir', type=str, default='data/cybertron_baseline')
     parser.add_argument('--skip_train', action='store_true')
     parser.add_argument('--skip_val', action='store_true')
     args = parser.parse_args()
+
+    # Set globals from experiment config
+    exp_cfg = EXP_CONFIGS[args.exp]
+    DATA_CACHE_PATH = exp_cfg['data_cache_path']
+    BLENDED_HASH    = exp_cfg['blended_hash']
+    if args.n_train_samples is None:
+        args.n_train_samples = exp_cfg['n_train_samples']
+
+    print(f"Experiment: scaling_moe_00{args.exp}")
+    print(f"  data_cache_path: {DATA_CACHE_PATH}")
+    print(f"  blended_hash:    {BLENDED_HASH}")
+    print(f"  n_train_samples: {args.n_train_samples:,}")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
