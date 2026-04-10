@@ -460,7 +460,7 @@ class GPT(nn.Module):
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         flops_achieved = flops_per_iter * (1.0 / dt)
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops
+        flops_promised = 989e12  # H100 GPU bfloat16 peak flops
         mfu = flops_achieved / flops_promised
         return mfu
 
