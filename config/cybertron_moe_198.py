@@ -33,8 +33,8 @@ wandb_run_name = 'cybertron_moe_198'
 
 # Data — same as dense baseline (pretrain_v3, 198 data cache)
 dataset = 'cybertron_baseline_cybertron'
-gradient_accumulation_steps = 64  # global_batch=128 / (micro_batch=2 × 1 gpu); ÷ world_size in train.py
-batch_size = 2
+gradient_accumulation_steps = 128  # global_batch=128 / (micro_batch=1 × 1 gpu); ÷ world_size in train.py
+batch_size = 1
 block_size = 8192
 
 # Model architecture — same hidden/layers as dense baseline, MoE on layers 1-15
