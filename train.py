@@ -451,48 +451,57 @@ while True:
         param_group['lr'] = lr
 
     # Evaluate and checkpoint
-    if iter_num % eval_interval == 0 and master_process:
-        # Snapshot state BEFORE estimate_loss() consumes extra batches
+    # All DDP ranks must participate in estimate_loss() since it contains dist.all_reduce.
+    if iter_num % eval_interval == 0:
+        # Snapshot state BEFORE estimate_loss() on ALL ranks (eval advances _seq_data_pos)
         pre_eval_seq_pos = dict(_seq_data_pos)
-        pre_eval_X = X.clone()
-        pre_eval_Y = Y.clone()
         pre_eval_rng_cpu = torch.get_rng_state()
         pre_eval_rng_cuda = torch.cuda.get_rng_state_all()
+        if master_process:
+            pre_eval_X = X.clone()
+            pre_eval_Y = Y.clone()
 
         losses = estimate_loss()
-        consumed_samples = (iter_num + 1) * _eff_gbs
-        print(f"step {iter_num} (samples {consumed_samples:,}): "
-              f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.6e}")
-        if wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "consumed_samples": consumed_samples,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu * 100,
-            })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                    # Pre-eval RNG + data state for bitwise-deterministic resume:
-                    # On resume, eval re-runs from this exact state, then training
-                    # step iter_num uses X/Y (= the batch pre-fetched after step iter_num-1).
-                    'rng_state_cpu': pre_eval_rng_cpu,
-                    'rng_state_cuda': pre_eval_rng_cuda,
-                    'seq_data_pos': pre_eval_seq_pos,
-                    'X': pre_eval_X.cpu(),
-                    'Y': pre_eval_Y.cpu(),
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+
+        # Restore data position and RNG on ALL ranks so eval batches don't skip training data
+        _seq_data_pos.update(pre_eval_seq_pos)
+        torch.set_rng_state(pre_eval_rng_cpu)
+        torch.cuda.set_rng_state_all(pre_eval_rng_cuda)
+
+        if master_process:
+            consumed_samples = (iter_num + 1) * _eff_gbs
+            print(f"step {iter_num} (samples {consumed_samples:,}): "
+                  f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, lr {lr:.6e}")
+            if wandb_log:
+                wandb.log({
+                    "iter": iter_num,
+                    "consumed_samples": consumed_samples,
+                    "train/loss": losses['train'],
+                    "val/loss": losses['val'],
+                    "lr": lr,
+                    "mfu": running_mfu * 100,
+                })
+            if losses['val'] < best_val_loss or always_save_checkpoint:
+                best_val_loss = losses['val']
+                if iter_num > 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'model_args': model_args,
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                        # Pre-eval RNG + data state for bitwise-deterministic resume:
+                        # On resume, eval re-runs from this exact state, then training
+                        # step iter_num uses X/Y (= the batch pre-fetched after step iter_num-1).
+                        'rng_state_cpu': pre_eval_rng_cpu,
+                        'rng_state_cuda': pre_eval_rng_cuda,
+                        'seq_data_pos': pre_eval_seq_pos,
+                        'X': pre_eval_X.cpu(),
+                        'Y': pre_eval_Y.cpu(),
+                    }
+                    print(f"saving checkpoint to {out_dir}")
+                    torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
