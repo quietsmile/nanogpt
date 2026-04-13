@@ -301,6 +301,10 @@ class MoERouter(nn.Module):
                     0, topk_idx.reshape(-1),
                     torch.ones(S * K, dtype=torch.float32, device=x.device)
                 )
+                # All-reduce across DDP ranks for global load counts
+                import torch.distributed as dist
+                if dist.is_available() and dist.is_initialized():
+                    dist.all_reduce(tokens_per_expert, op=dist.ReduceOp.SUM)
                 mean_load = tokens_per_expert.mean()
                 self.e_score_correction_bias.add_(
                     (mean_load - tokens_per_expert).sign().to(self.e_score_correction_bias.dtype)

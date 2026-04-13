@@ -137,6 +137,7 @@ if ddp:
     gradient_accumulation_steps //= ddp_world_size
 else:
     master_process = True
+    ddp_rank = 0
     ddp_world_size = 1
 
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
@@ -182,8 +183,10 @@ def get_batch(split):
 
 
 # Sequential data loader for cybertron-aligned training
-# When using cybertron data (dataset ends with '_cybertron'), we read sequentially
-_seq_data_pos = {'train': 0, 'val': 0}
+# When using cybertron data (dataset ends with '_cybertron'), we read sequentially.
+# DDP: rank r reads samples r, r+W, r+2W, ... (interleaved sharding, W = world_size).
+# Val: all ranks read from position 0 (same data; losses are all-reduced later).
+_seq_data_pos = {'train': ddp_rank * batch_size, 'val': 0}
 _seq_data = {}
 
 
@@ -201,11 +204,15 @@ def get_batch_sequential(split):
     sample_stride = block_size + 1
     n_samples = (n_tokens - 1) // sample_stride
 
+    # For train: interleave across DDP ranks so each rank reads distinct samples.
+    # For val: all ranks read the same data (averaged in estimate_loss).
+    step = ddp_world_size * batch_size if (ddp and split == 'train') else batch_size
+
     indices = []
-    for _ in range(batch_size):
-        idx = _seq_data_pos[split] % n_samples
+    for i in range(batch_size):
+        idx = (_seq_data_pos[split] + i) % n_samples
         indices.append(idx * sample_stride)
-        _seq_data_pos[split] += 1
+    _seq_data_pos[split] += step
 
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in indices])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in indices])
@@ -406,7 +413,13 @@ def estimate_loss():
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
-        out[split] = losses.mean()
+        mean_loss = losses.mean()
+        # All-reduce across DDP ranks so every rank reports the global average
+        if ddp:
+            mean_loss_t = torch.tensor(mean_loss, device=device)
+            torch.distributed.all_reduce(mean_loss_t, op=torch.distributed.ReduceOp.AVG)
+            mean_loss = mean_loss_t.item()
+        out[split] = mean_loss
     model.train()
     return out
 
