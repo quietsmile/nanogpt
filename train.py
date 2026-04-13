@@ -333,7 +333,8 @@ if compile:
     model = torch.compile(model)
 
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+    # find_unused_parameters=True: MoE experts with 0 tokens in a batch have no gradient
+    model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
 
 # -----------------------------------------------------------------------------
 # LR scheduling
