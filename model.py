@@ -273,19 +273,8 @@ class MoERouter(nn.Module):
         # 2. Add correction bias for routing decision (NOT added to final weights)
         scores_biased = scores + self.e_score_correction_bias
 
-        # 3. Pick top-1 group: max score per group
-        epg = self.experts_per_group
-        group_scores = scores_biased.view(S, G, epg).max(dim=-1).values  # [S, G]
-        _, selected_group = group_scores.topk(self.topk_group, dim=-1)   # [S, topk_group=1]
-
-        # 4. Mask non-selected groups
-        group_mask = torch.zeros(S, G, dtype=scores_biased.dtype, device=x.device)
-        group_mask.scatter_(1, selected_group, 1.0)  # [S, G]
-        expert_mask = group_mask.unsqueeze(-1).expand(S, G, epg).reshape(S, E)
-        scores_masked = scores_biased.masked_fill(expert_mask == 0, float('-inf'))
-
-        # 5. Top-K within the selected group
-        topk_idx = scores_masked.topk(K, dim=-1).indices  # [S, K]
+        # 3. Direct top-K from all experts (no group pre-selection)
+        topk_idx = scores_biased.topk(K, dim=-1).indices  # [S, K]
 
         # 6. Final weights: ORIGINAL (unbiased) scores at selected positions
         final_weights = scores.gather(1, topk_idx)  # [S, K]
