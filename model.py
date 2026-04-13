@@ -273,10 +273,22 @@ class MoERouter(nn.Module):
         # 2. Add correction bias for routing decision (NOT added to final weights)
         scores_biased = scores + self.e_score_correction_bias
 
-        # 3. Direct top-K from all experts (no group pre-selection)
-        topk_idx = scores_biased.topk(K, dim=-1).indices  # [S, K]
+        # 3. Group-limited top-K (matches cybertron group_limited_topk):
+        #    For each group, sum the top-(K // topk_group) scores to get group score,
+        #    select topk_group groups, then pick top-K from those groups.
+        epg = self.experts_per_group
+        # top-(K//topk_group) scores per group, summed → group score [S, G]
+        group_scores = scores_biased.view(S, G, epg).topk(K // self.topk_group, dim=-1).values.sum(dim=-1)
+        # select topk_group groups
+        group_idx = group_scores.topk(self.topk_group, dim=-1).indices  # [S, topk_group]
+        group_mask = torch.zeros(S, G, dtype=scores_biased.dtype, device=x.device)
+        group_mask.scatter_(1, group_idx, 1.0)
+        # expand mask to expert level and apply
+        score_mask = group_mask.unsqueeze(-1).expand(S, G, epg).reshape(S, E)
+        scores_masked = scores_biased.masked_fill(score_mask == 0, float('-inf'))
+        topk_idx = scores_masked.topk(K, dim=-1).indices  # [S, K]
 
-        # 6. Final weights: ORIGINAL (unbiased) scores at selected positions
+        # 4. Final weights: ORIGINAL (unbiased) scores at selected positions
         final_weights = scores.gather(1, topk_idx)  # [S, K]
         if self.norm_topk_prob:
             final_weights = final_weights / (final_weights.sum(dim=-1, keepdim=True) + 1e-20)

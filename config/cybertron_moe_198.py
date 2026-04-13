@@ -1,18 +1,21 @@
 # Config for nanogpt MoE model, aligned with scaling_moe_00198 actual architecture.
 #
-# Model architecture (from cybertron 198 MoE):
-#   hidden_size=512, num_layers=9 (1 dense + 8 MoE), num_q_heads=4, num_kv_heads=2, head_dim=64
-#   num_experts=144, topk=8, expert_hidden=160, shared_expert_hidden=160
-#   dense_ffn_hidden=1536 (layer 0), moe_layer_freq=[0]+[1]*8
-#   DeepSeek aux-free grouped routing: 8 groups of 18, pick 1 group then top-8
+# Source: /prodcpfs/user/data/GitLab/pretrain_scaling_ladder/scaling_moe_00198.yaml
+#
+# Model architecture:
+#   hidden_size=656, num_layers=16 (1 dense + 15 MoE), num_attention_heads=8,
+#   num_query_groups=4, kv_channels=64
+#   num_experts=144, topk=8, moe_ffn_hidden=224, shared_expert_hidden=224
+#   dense_ffn_hidden=1920 (layer 0), moe_layer_freq=[0]+[1]*15
+#   Grouped routing: n_group=8 (18 experts/group), topk_group=1
+#   Group score = sum of top-(topk//topk_group)=8 scores per group → pick best group → top-8
 #
 # Parameter count (excl. wte+lmhead):
-#   ~292M total, ~24M active per token
-#   wte+lmhead: 2 × 152064×512 = 155.7M
-#   Actual total: ~447M
+#   ~292M total routed params, ~24M active per token
+#   wte+lmhead: 2 × 152064×656 = 199.5M
 #
 # Dense baseline (for comparison): config/cybertron_baseline.py
-#   hidden=656, 16 layers — iso-FLOP dense equivalent, already trained
+#   hidden=656, 16 layers, ffn_hidden=1920 all dense — same hidden/layers, no MoE
 
 # I/O
 out_dir = 'out-cybertron-moe-198'
@@ -34,18 +37,18 @@ gradient_accumulation_steps = 64  # global_batch=128 / (micro_batch=2 × 1 gpu);
 batch_size = 2
 block_size = 8192
 
-# Model architecture — MoE 198
-n_layer = 9
-n_head = 4
-n_embd = 512
-n_kv_head = 2
+# Model architecture — same hidden/layers as dense baseline, MoE on layers 1-15
+n_layer = 16
+n_head = 8
+n_embd = 656
+n_kv_head = 4
 kv_channels = 64
 use_rope = True
 rotary_base = 50000
 use_rmsnorm = True
 norm_eps = 1e-5
 use_swiglu = True
-ffn_hidden_size = 1536      # dense layer 0 FFN hidden size (512×3)
+ffn_hidden_size = 1920      # dense layer 0 FFN hidden size (same as dense baseline)
 qk_layernorm = True
 tie_embeddings = False
 init_std = 0.006
@@ -54,17 +57,17 @@ dropout = 0.0
 bias = False
 vocab_size_override = 152064  # Qwen tokenizer
 
-# MoE settings — DeepSeek aux-free grouped routing (matches cybertron 198)
+# MoE settings — grouped routing matching cybertron 198
 use_moe = True
-moe_layer_freq = [0] + [1] * 8    # layer 0 dense, layers 1-8 MoE
+moe_layer_freq = [0] + [1] * 15   # layer 0 dense, layers 1-15 MoE
 num_experts = 144                   # routed experts per MoE layer (8 groups × 18 per group)
-moe_ffn_hidden_size = 160           # per-expert SwiGLU hidden (Intermediate_size)
-moe_router_topk = 8                 # top-8 per token (from selected group of 18)
+moe_ffn_hidden_size = 224           # per-expert SwiGLU hidden (moe_ffn_hidden_size)
+moe_router_topk = 8                 # top-8 per token
 moe_n_group = 8                     # 144/8 = 18 experts per group
 moe_topk_group = 1                  # select 1 group per token
 moe_norm_topk_prob = True           # normalize top-8 scores to sum=1
 moe_router_score_correction_coeff = 0.001  # bias update step for aux-free load balance
-moe_shared_expert_hidden_size = 160  # always-on shared expert hidden size
+moe_shared_expert_hidden_size = 224  # always-on shared expert hidden size
 
 # Optimizer — same as dense baseline (matches cybertron FusedAdam)
 learning_rate = 0.000828
