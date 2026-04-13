@@ -266,9 +266,9 @@ class MoERouter(nn.Module):
         G = self.n_group
         K = self.topk
 
-        # 1. Compute scores in fp32 (moe_gating_fp32=True)
-        logits = self.linear(x.float())             # [S, E], fp32
-        scores = torch.sigmoid(logits).to(x.dtype)  # [S, E], bf16
+        # 1. Compute scores in fp32 (moe_gating_fp32=True): cast both input and weight to fp32
+        logits = F.linear(x.float(), self.linear.weight.float())  # [S, E], fp32
+        scores = torch.sigmoid(logits).to(x.dtype)                # [S, E], original dtype
 
         # 2. Add correction bias for routing decision (NOT added to final weights)
         scores_biased = scores + self.e_score_correction_bias
@@ -351,18 +351,40 @@ class MoEFFN(nn.Module):
         else:
             shared_out = torch.zeros_like(x_flat)
 
-        # Routed experts: dispatch-and-combine
+        # Routed experts: expert-centric dispatch (O(num_experts) Python iterations)
         topk_idx, weights = self.router(x_flat)  # [B*T, K], [B*T, K]
-        routed_out = torch.zeros_like(x_flat)
+        S = x_flat.shape[0]
+        K = self.topk
+        E = self.num_experts
 
-        for k in range(self.topk):           # K=8 slots
-            idx_k = topk_idx[:, k]           # [B*T] expert index per token for this slot
-            w_k   = weights[:, k, None]      # [B*T, 1] weight per token for this slot
-            for e in range(self.num_experts):  # 144 experts
-                sel = (idx_k == e)
-                if not sel.any():
-                    continue
-                routed_out[sel] = routed_out[sel] + w_k[sel] * self.experts[e](x_flat[sel])
+        # Flatten to (S*K,) arrays of token indices, expert indices, weights
+        token_ids  = torch.arange(S, device=x.device).unsqueeze(1).expand(S, K).reshape(-1)
+        expert_ids = topk_idx.reshape(-1)
+        flat_w     = weights.reshape(-1)
+
+        # Sort by expert → contiguous slices per expert
+        order      = expert_ids.argsort(stable=True)
+        token_ids  = token_ids[order]
+        expert_ids = expert_ids[order]
+        flat_w     = flat_w[order]
+
+        # Compute per-expert counts; move to CPU in one transfer to avoid per-expert syncs
+        counts     = expert_ids.bincount(minlength=E)       # [E], GPU
+        counts_cpu = counts.cpu().tolist()                  # one H2D sync
+        offsets_cpu = [0] * (E + 1)
+        for i in range(E):
+            offsets_cpu[i + 1] = offsets_cpu[i] + counts_cpu[i]
+
+        routed_out = torch.zeros_like(x_flat)
+        for e in range(E):
+            n = counts_cpu[e]
+            if n == 0:
+                continue
+            s          = offsets_cpu[e]
+            tids       = token_ids[s:s + n]
+            ws         = flat_w[s:s + n, None]
+            expert_out = self.experts[e](x_flat[tids])
+            routed_out.index_add_(0, tids, (ws * expert_out).to(routed_out.dtype))
 
         return (shared_out + routed_out).view(B, T, C)
 
