@@ -223,9 +223,152 @@ class SwiGLUMLP(nn.Module):
         return self.dropout(self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x)))
 
 
-class Block(nn.Module):
+class ExpertMLP(nn.Module):
+    """Single routed expert: SwiGLU FFN (512→160→512 for MoE 198)."""
+
+    def __init__(self, n_embd, hidden_size, bias=False):
+        super().__init__()
+        self.gate_proj = nn.Linear(n_embd, hidden_size, bias=bias)
+        self.up_proj   = nn.Linear(n_embd, hidden_size, bias=bias)
+        self.down_proj = nn.Linear(hidden_size, n_embd, bias=bias)
+
+    def forward(self, x):
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class MoERouter(nn.Module):
+    """Grouped sigmoid top-k router with expert score correction bias.
+
+    Matches cybertron's router_scoring_func=sigmoid, n_group grouped routing,
+    norm_topk_prob=True, and use_router_expert_score_correction.
+    """
+
+    def __init__(self, n_embd, num_experts, topk, n_group, topk_group,
+                 norm_topk_prob, score_correction_coeff):
+        super().__init__()
+        assert num_experts % n_group == 0, "num_experts must be divisible by n_group"
+        self.num_experts = num_experts
+        self.topk = topk
+        self.n_group = n_group
+        self.topk_group = topk_group
+        self.norm_topk_prob = norm_topk_prob
+        self.score_correction_coeff = score_correction_coeff
+        self.experts_per_group = num_experts // n_group
+
+        # Router linear (fp32 forward via moe_gating_fp32)
+        self.linear = nn.Linear(n_embd, num_experts, bias=False)
+        # Score correction bias: updated each step, NOT via gradients
+        self.register_buffer('e_score_correction_bias', torch.zeros(num_experts))
+
+    def forward(self, x):  # x: [S, n_embd]
+        S = x.shape[0]
+        E = self.num_experts
+        G = self.n_group
+        K = self.topk
+
+        # 1. Compute scores in fp32 (moe_gating_fp32=True)
+        logits = self.linear(x.float())             # [S, E], fp32
+        scores = torch.sigmoid(logits).to(x.dtype)  # [S, E], bf16
+
+        # 2. Add correction bias for routing decision (NOT added to final weights)
+        scores_biased = scores + self.e_score_correction_bias
+
+        # 3. Pick top-1 group: max score per group
+        epg = self.experts_per_group
+        group_scores = scores_biased.view(S, G, epg).max(dim=-1).values  # [S, G]
+        _, selected_group = group_scores.topk(self.topk_group, dim=-1)   # [S, topk_group=1]
+
+        # 4. Mask non-selected groups
+        group_mask = torch.zeros(S, G, dtype=scores_biased.dtype, device=x.device)
+        group_mask.scatter_(1, selected_group, 1.0)  # [S, G]
+        expert_mask = group_mask.unsqueeze(-1).expand(S, G, epg).reshape(S, E)
+        scores_masked = scores_biased.masked_fill(expert_mask == 0, float('-inf'))
+
+        # 5. Top-K within the selected group
+        topk_idx = scores_masked.topk(K, dim=-1).indices  # [S, K]
+
+        # 6. Final weights: ORIGINAL (unbiased) scores at selected positions
+        final_weights = scores.gather(1, topk_idx)  # [S, K]
+        if self.norm_topk_prob:
+            final_weights = final_weights / (final_weights.sum(dim=-1, keepdim=True) + 1e-20)
+
+        # 7. Update correction bias during training (manual, not via gradient)
+        if self.training:
+            with torch.no_grad():
+                tokens_per_expert = torch.zeros(E, dtype=torch.float32, device=x.device)
+                tokens_per_expert.scatter_add_(
+                    0, topk_idx.reshape(-1),
+                    torch.ones(S * K, dtype=torch.float32, device=x.device)
+                )
+                mean_load = tokens_per_expert.mean()
+                self.e_score_correction_bias.add_(
+                    (mean_load - tokens_per_expert).sign().to(self.e_score_correction_bias.dtype)
+                    * self.score_correction_coeff
+                )
+
+        return topk_idx, final_weights  # [S, K], [S, K]
+
+
+class MoEFFN(nn.Module):
+    """MoE FFN layer: grouped routing + N experts + always-on shared expert.
+
+    Matches cybertron's MoE structure: shared expert output + weighted sum of
+    top-K routed expert outputs.
+    """
 
     def __init__(self, config):
+        super().__init__()
+        self.router = MoERouter(
+            n_embd=config.n_embd,
+            num_experts=config.num_experts,
+            topk=config.moe_router_topk,
+            n_group=config.moe_n_group,
+            topk_group=config.moe_topk_group,
+            norm_topk_prob=config.moe_norm_topk_prob,
+            score_correction_coeff=config.moe_router_score_correction_coeff,
+        )
+        self.experts = nn.ModuleList([
+            ExpertMLP(config.n_embd, config.moe_ffn_hidden_size, bias=config.bias)
+            for _ in range(config.num_experts)
+        ])
+        if config.moe_shared_expert_hidden_size is not None:
+            self.shared_expert = ExpertMLP(
+                config.n_embd, config.moe_shared_expert_hidden_size, bias=config.bias
+            )
+        else:
+            self.shared_expert = None
+        self.num_experts = config.num_experts
+        self.topk = config.moe_router_topk
+
+    def forward(self, x):  # x: [B, T, C]
+        B, T, C = x.shape
+        x_flat = x.view(B * T, C)
+
+        # Shared expert (always active, moe_shared_expert_overlap=False → sequential)
+        if self.shared_expert is not None:
+            shared_out = self.shared_expert(x_flat)  # [B*T, C]
+        else:
+            shared_out = torch.zeros_like(x_flat)
+
+        # Routed experts: dispatch-and-combine
+        topk_idx, weights = self.router(x_flat)  # [B*T, K], [B*T, K]
+        routed_out = torch.zeros_like(x_flat)
+
+        for k in range(self.topk):           # K=8 slots
+            idx_k = topk_idx[:, k]           # [B*T] expert index per token for this slot
+            w_k   = weights[:, k, None]      # [B*T, 1] weight per token for this slot
+            for e in range(self.num_experts):  # 144 experts
+                sel = (idx_k == e)
+                if not sel.any():
+                    continue
+                routed_out[sel] = routed_out[sel] + w_k[sel] * self.experts[e](x_flat[sel])
+
+        return (shared_out + routed_out).view(B, T, C)
+
+
+class Block(nn.Module):
+
+    def __init__(self, config, layer_idx=0):
         super().__init__()
         # Normalization
         if config.use_rmsnorm:
@@ -237,8 +380,15 @@ class Block(nn.Module):
 
         self.attn = CausalSelfAttention(config)
 
-        # FFN
-        if config.use_swiglu:
+        # FFN: MoE or dense, based on moe_layer_freq
+        use_moe = (
+            config.use_moe
+            and config.moe_layer_freq is not None
+            and config.moe_layer_freq[layer_idx] == 1
+        )
+        if use_moe:
+            self.mlp = MoEFFN(config)
+        elif config.use_swiglu:
             self.mlp = SwiGLUMLP(config)
         else:
             self.mlp = MLP(config)
@@ -274,6 +424,18 @@ class GPTConfig:
     qk_layernorm: bool = False        # Apply RMSNorm to Q and K per-head, before RoPE
     disable_scaled_init_method: bool = False  # If True, skip 1/sqrt(2*n_layer) scaling for residual projs
 
+    # --- MoE options (DeepSeek aux-free grouped routing) ---
+    use_moe: bool = False
+    moe_layer_freq: Optional[list] = None  # e.g. [0,1,1,...,1]; None = all dense
+    num_experts: int = 64              # routed experts per MoE layer
+    moe_ffn_hidden_size: int = 128     # per-expert SwiGLU hidden size
+    moe_router_topk: int = 2           # top-K experts selected per token
+    moe_n_group: int = 1               # num groups for grouped routing
+    moe_topk_group: int = 1            # num groups selected per token (currently only 1)
+    moe_norm_topk_prob: bool = True    # normalize top-K scores to sum=1
+    moe_router_score_correction_coeff: float = 0.001  # bias update step (aux-free load balance)
+    moe_shared_expert_hidden_size: Optional[int] = None  # None = no shared expert
+
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:
             # Default SwiGLU hidden size: 2/3 * 4 * n_embd, rounded to multiple of 64
@@ -294,7 +456,7 @@ class GPT(nn.Module):
         transformer_dict = dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
         )
 
         if config.use_rope:

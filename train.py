@@ -69,6 +69,17 @@ tie_embeddings = True
 init_std = 0.02
 qk_layernorm = False  # RMSNorm on Q/K per head before RoPE (cybertron qk_layernorm)
 disable_scaled_init_method = False  # skip 1/sqrt(2*n_layer) scaling for residual projs
+# MoE (DeepSeek aux-free grouped routing)
+use_moe = False
+moe_layer_freq = None   # list e.g. [0]+[1]*8; None = all dense. NOTE: list type is handled below
+num_experts = 64
+moe_ffn_hidden_size = 128
+moe_router_topk = 2
+moe_n_group = 1
+moe_topk_group = 1
+moe_norm_topk_prob = True
+moe_router_score_correction_coeff = 0.001
+moe_shared_expert_hidden_size = None
 # adamw optimizer
 learning_rate = 6e-4
 max_iters = 600000
@@ -100,7 +111,7 @@ deterministic = False      # set True for bitwise reproducible training
 seed = 1337
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items()
-               if not k.startswith('_') and isinstance(v, (int, float, bool, str, type(None)))]
+               if not k.startswith('_') and isinstance(v, (int, float, bool, str, type(None), list))]
 exec(open('configurator.py').read())
 config = {k: globals()[k] for k in config_keys}
 # -----------------------------------------------------------------------------
@@ -232,8 +243,20 @@ model_args = dict(
     tie_embeddings=tie_embeddings, init_std=init_std,
     qk_layernorm=qk_layernorm,
     disable_scaled_init_method=disable_scaled_init_method,
+    # MoE
+    use_moe=use_moe,
+    moe_layer_freq=moe_layer_freq,
+    num_experts=num_experts,
+    moe_ffn_hidden_size=moe_ffn_hidden_size,
+    moe_router_topk=moe_router_topk,
+    moe_n_group=moe_n_group,
+    moe_topk_group=moe_topk_group,
+    moe_norm_topk_prob=moe_norm_topk_prob,
+    moe_router_score_correction_coeff=moe_router_score_correction_coeff,
+    moe_shared_expert_hidden_size=moe_shared_expert_hidden_size,
 )
 
+_resume_batch = None  # set below when resuming from checkpoint
 if init_from == 'scratch':
     print("Initializing a new model from scratch")
     if meta_vocab_size is None:
@@ -249,7 +272,10 @@ elif init_from == 'resume':
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size',
               'n_kv_head', 'kv_channels', 'use_rope', 'rotary_base', 'use_rmsnorm', 'norm_eps',
               'use_swiglu', 'ffn_hidden_size', 'tie_embeddings', 'init_std',
-              'qk_layernorm', 'disable_scaled_init_method']:
+              'qk_layernorm', 'disable_scaled_init_method',
+              'use_moe', 'moe_layer_freq', 'num_experts', 'moe_ffn_hidden_size',
+              'moe_router_topk', 'moe_n_group', 'moe_topk_group', 'moe_norm_topk_prob',
+              'moe_router_score_correction_coeff', 'moe_shared_expert_hidden_size']:
         model_args[k] = checkpoint_model_args[k]
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
@@ -261,6 +287,16 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+    # Restore pre-eval RNG + data state for bitwise-deterministic resume
+    if 'rng_state_cpu' in checkpoint:
+        torch.set_rng_state(checkpoint['rng_state_cpu'].cpu())
+    if 'rng_state_cuda' in checkpoint:
+        torch.cuda.set_rng_state_all([s.cpu() for s in checkpoint['rng_state_cuda']])
+    if 'seq_data_pos' in checkpoint:
+        _seq_data_pos.update(checkpoint['seq_data_pos'])
+    # Restore the batch that was current when checkpoint was saved
+    _resume_batch = (checkpoint['X'].to(device), checkpoint['Y'].to(device)) \
+        if 'X' in checkpoint else None
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     override_args = dict(dropout=dropout)
@@ -385,7 +421,11 @@ if wandb_log and master_process:
 # -----------------------------------------------------------------------------
 # Training loop
 # -----------------------------------------------------------------------------
-X, Y = _get_batch('train')
+# On resume, use the saved batch so training step iter_num uses identical data
+if init_from == 'resume' and _resume_batch is not None:
+    X, Y = _resume_batch
+else:
+    X, Y = _get_batch('train')
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -399,6 +439,13 @@ while True:
 
     # Evaluate and checkpoint
     if iter_num % eval_interval == 0 and master_process:
+        # Snapshot state BEFORE estimate_loss() consumes extra batches
+        pre_eval_seq_pos = dict(_seq_data_pos)
+        pre_eval_X = X.clone()
+        pre_eval_Y = Y.clone()
+        pre_eval_rng_cpu = torch.get_rng_state()
+        pre_eval_rng_cuda = torch.cuda.get_rng_state_all()
+
         losses = estimate_loss()
         consumed_samples = (iter_num + 1) * _eff_gbs
         print(f"step {iter_num} (samples {consumed_samples:,}): "
@@ -422,6 +469,14 @@ while True:
                     'iter_num': iter_num,
                     'best_val_loss': best_val_loss,
                     'config': config,
+                    # Pre-eval RNG + data state for bitwise-deterministic resume:
+                    # On resume, eval re-runs from this exact state, then training
+                    # step iter_num uses X/Y (= the batch pre-fetched after step iter_num-1).
+                    'rng_state_cpu': pre_eval_rng_cpu,
+                    'rng_state_cuda': pre_eval_rng_cuda,
+                    'seq_data_pos': pre_eval_seq_pos,
+                    'X': pre_eval_X.cpu(),
+                    'Y': pre_eval_Y.cpu(),
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
