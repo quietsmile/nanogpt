@@ -175,6 +175,11 @@ iter 5989 的对比结果（ref iter-5988 ckpt → 5989 batch）：
 
 **所有逐层 std 都在 0.2% 以内对齐**。说明每一层 sublayer 的 forward 数学都是正确的。
 
+Hook 解读对齐（通过权重 rms 比对验证）：
+- `act_std/decoder_input` = post-embed（ref 0.0624 = embed.weight.rms 附近）✓
+- `act_std/attn_output` / `ffn_output` / `*_plus_residual` — 对应层输出，数值对齐
+- `act_std/final_input` = **post-ln_f 输出**（ref 2.2129 = final_ln.weight.rms 2.2148 匹配）
+
 **attn-specific 指标：**
 | 指标 | nano | ref |
 |---|---|---|
