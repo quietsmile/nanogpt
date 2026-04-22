@@ -1,0 +1,267 @@
+{
+  "headers": {
+    "date": "Mon, 20 Apr 2026 01:45:24 GMT",
+    "content-type": "application/json;charset=utf-8",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "keep-alive": "timeout=25",
+    "vary": "Accept-Encoding, Accept-Encoding",
+    "access-control-allow-origin": "*",
+    "access-control-expose-headers": "*",
+    "x-acs-request-id": "92FF3B22-08A6-3D20-9C94-7332E4566135",
+    "x-acs-trace-id": "7e4ffad5c51efc6d72e0351aaff9cda4",
+    "server": "Tengine",
+    "cache-control": "no-store,no-cache"
+  },
+  "statusCode": 200,
+  "body": {
+    "Accessibility": "PRIVATE",
+    "ClusterId": "asi_ap-southeast-1_pai-serverless-sale_prd01.1079135428626537",
+    "CodeSource": {
+      "CodeSourceId": "",
+      "MountPath": ""
+    },
+    "CredentialConfig": {
+      "AliyunEnvRoleKey": "",
+      "CredentialConfigItems": [],
+      "EnableCredentialInject": false
+    },
+    "CustomEnvs": [],
+    "DataSources": [
+      {
+        "DataSourceId": "d-s5sllzhztbq48bhexm",
+        "MountPath": "/newcpfs",
+        "Uri": ""
+      },
+      {
+        "DataSourceId": "d-pjrn9ep72mmu76t8ds",
+        "MountPath": "/cpfs",
+        "Uri": ""
+      },
+      {
+        "DataSourceId": "d-oearlejih3y5zs92db",
+        "MountPath": "/prodcpfs",
+        "Uri": ""
+      }
+    ],
+    "DisplayName": "scaling_moe_00196",
+    "Duration": 8620,
+    "ElasticSpec": {
+      "AIMasterDockerImage": "",
+      "AIMasterType": "",
+      "ElasticStrategy": "",
+      "EnableAIMaster": false,
+      "EnableElasticTraining": false,
+      "EnablePsJobElasticPS": false,
+      "EnablePsJobElasticWorker": false,
+      "EnablePsResourceEstimate": false,
+      "MaxParallelism": 0,
+      "MinParallelism": 0,
+      "PSMaxParallelism": 0,
+      "PSMinParallelism": 0
+    },
+    "EnabledDebugger": false,
+    "Envs": {},
+    "GmtCreateTime": "2026-04-07T04:51:46Z",
+    "GmtFinishTime": "2026-04-07T07:15:26Z",
+    "GmtRunningTime": "2026-04-07T04:56:15Z",
+    "GmtSubmittedTime": "2026-04-07T04:51:50Z",
+    "GmtSuccessedTime": "2026-04-07T07:15:26Z",
+    "JobId": "dlc1q9arre48b0kx",
+    "JobReplicaStatuses": [],
+    "JobSpecs": [
+      {
+        "AssignNodeSpec": {
+          "AntiAffinityHyperNodes": [],
+          "AntiAffinityNodeNames": "",
+          "EnableAssignNode": false,
+          "HyperNodes": [],
+          "NodeNames": ""
+        },
+        "EcsSpec": "",
+        "Image": "ali-sg-acr-registry-vpc.ap-southeast-1.cr.aliyuncs.com/xhs-llm/ruofeng:dots3-environ-0207",
+        "ImageConfig": {
+          "Auth": "",
+          "DockerRegistry": "",
+          "Password": "",
+          "Username": ""
+        },
+        "LocalMountSpecs": [],
+        "PodCount": 1,
+        "ResourceConfig": {
+          "CPU": "100",
+          "GPU": "8",
+          "GPUType": "",
+          "Memory": "1000Gi",
+          "SharedMemory": "1000Gi"
+        },
+        "StartupDependencies": [],
+        "Type": "Worker"
+      }
+    ],
+    "JobType": "PyTorchJob",
+    "Pods": [
+      {
+        "Duration": 8647,
+        "GmtCreateTime": "2026-04-07T04:51:50Z",
+        "GmtFinishTime": "2026-04-07T07:15:57Z",
+        "GmtStartTime": "2026-04-07T04:51:56Z",
+        "HistoryPods": [],
+        "Ip": "11.0.181.164",
+        "NodeName": "lingjmpk1zc3hh9f-mg1akl4w8evv0wsq-0",
+        "PodId": "dlc1q9arre48b0kx-aimaster-0",
+        "PodIps": [
+          {
+            "InterfaceName": "eth0",
+            "Ip": "22.4.128.11"
+          }
+        ],
+        "PodUid": "68b22784-9594-4442-84c7-da184d71ed0d",
+        "ResourceType": "Normal",
+        "Status": "Stopped",
+        "SubStatus": "Stopped",
+        "Type": "aimaster"
+      },
+      {
+        "Duration": 8565,
+        "GmtCreateTime": "2026-04-07T04:51:50Z",
+        "GmtFinishTime": "2026-04-07T07:14:35Z",
+        "GmtStartTime": "2026-04-07T04:56:14Z",
+        "HistoryPods": [],
+        "Ip": "11.0.176.155",
+        "NodeName": "lingj1vyqhafl7tz-mgvlscufx3vy2vt8-11",
+        "PodId": "dlc1q9arre48b0kx-master-0",
+        "PodIps": [
+          {
+            "InterfaceName": "eth1",
+            "Ip": "22.1.95.131"
+          },
+          {
+            "InterfaceName": "eth4",
+            "Ip": "22.1.95.70"
+          },
+          {
+            "InterfaceName": "eth6",
+            "Ip": "22.0.186.40"
+          },
+          {
+            "InterfaceName": "eth0",
+            "Ip": "22.0.187.105"
+          },
+          {
+            "InterfaceName": "eth2",
+            "Ip": "22.0.187.223"
+          },
+          {
+            "InterfaceName": "eth3",
+            "Ip": "22.1.89.96"
+          },
+          {
+            "InterfaceName": "eth5",
+            "Ip": "22.1.82.204"
+          },
+          {
+            "InterfaceName": "eth7",
+            "Ip": "22.1.84.184"
+          },
+          {
+            "InterfaceName": "net0",
+            "Ip": "10.39.16.146"
+          }
+        ],
+        "PodUid": "46c2e52a-b0f7-47db-8413-1f3fcc5155bc",
+        "ResourceType": "Normal",
+        "Status": "Succeeded",
+        "SubStatus": "Succeeded",
+        "Type": "master"
+      }
+    ],
+    "Priority": 7,
+    "ReasonCode": "JobSucceeded",
+    "ReasonMessage": "PyTorchJob dlc1q9arre48b0kx is successfully completed.",
+    "RequestId": "92FF3B22-08A6-3D20-9C94-7332E4566135",
+    "ResourceId": "quota1shcr2h7uae",
+    "ResourceLevel": "L0",
+    "ResourceType": "Lingjun",
+    "RestartRecord": [],
+    "RestartTimes": "",
+    "Settings": {
+      "AllocateAllRDMADevices": false,
+      "AllowUnschedulableNodes": false,
+      "BusinessUserId": "",
+      "Caller": "",
+      "DisableEcsStockCheck": false,
+      "Driver": "",
+      "EnableDSWDev": false,
+      "EnableErrorMonitoringInAIMaster": true,
+      "EnableOssAppend": false,
+      "EnableRDMA": true,
+      "EnableSanityCheck": false,
+      "EnableTideResource": false,
+      "ErrorMonitoringArgs": "--job-execution-mode=Sync --enable-job-restart=True --max-num-of-job-restart=10 --fault-tolerant-policy=OnFailure",
+      "JobReservedMinutes": 0,
+      "JobReservedPolicy": "",
+      "OversoldType": "ForbiddenQuotaOverSold",
+      "PipelineId": "",
+      "SanityCheckArgs": "",
+      "Tags": {
+        "CloneFromJobID": "dlc1m2vp55rtqi8t"
+      }
+    },
+    "Status": "Succeeded",
+    "StatusHistory": [
+      {
+        "EndTime": "2026-04-07T04:51:50Z",
+        "ReasonCode": "JobCreating",
+        "ReasonMessage": "Job is creating",
+        "StartTime": "2026-04-07T04:51:45Z",
+        "Status": "Creating"
+      },
+      {
+        "EndTime": "2026-04-07T04:54:13Z",
+        "ReasonCode": "JobEnqueued",
+        "ReasonMessage": "sync enqueue status from queueUnit status",
+        "StartTime": "2026-04-07T04:51:50Z",
+        "Status": "Queuing"
+      },
+      {
+        "EndTime": "2026-04-07T04:56:15Z",
+        "ReasonCode": "JobPreparing",
+        "ReasonMessage": "PyTorchJob dlc1q9arre48b0kx has been successfully scheduled and is now entering the preparation phase.",
+        "StartTime": "2026-04-07T04:54:13Z",
+        "Status": "EnvPreparing"
+      },
+      {
+        "EndTime": "2026-04-07T07:15:26Z",
+        "ReasonCode": "JobRunning",
+        "ReasonMessage": "PyTorchJob dlc1q9arre48b0kx is running.",
+        "StartTime": "2026-04-07T04:56:15Z",
+        "Status": "Running"
+      },
+      {
+        "EndTime": "2026-04-07T07:15:26Z",
+        "ReasonCode": "JobSucceeded",
+        "ReasonMessage": "PyTorchJob dlc1q9arre48b0kx is successfully completed.",
+        "StartTime": "2026-04-07T07:15:26Z",
+        "Status": "Succeeded"
+      }
+    ],
+    "SubStatus": "",
+    "TenantId": "1781574661016173",
+    "ThirdpartyLibDir": "",
+    "UserCommand": "set -x\nset -e\nexport GLOO_SOCKET_IFNAME=eth0\n\nEXP_NAME=scaling_moe_00196\nEXP_DIR=/prodcpfs/user/data/GitLab/pretrain_scaling_ladder\nYAML_PATH=scaling_moe_00196.yaml\nSAVE_ROOT=/prodcpfs/user/yuchen/scaling_exp/auto_test\n\nexport NCCL_DEBUG=WARN\nexport NCCL_IB_TIMEOUT=22\nexport TORCH_NCCL_AVOID_RECORD_STREAMS=1\nexport PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python\nexport NCCL_NVLS_ENABLE=0\nexport TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200\nexport NVTE_FUSED_ATTN=1\nexport NVTE_FLASH_ATTN=1\nexport NCCL_IB_GID_INDEX=3\nexport CYBERTRON_USE_HYDRA=1\nexport CUDA_DEVICE_MAX_CONNECTIONS=1\nexport TOKENIZERS_PARALLELISM=false\nexport PYTORCH_CUDA_ALLOC_CONF=\"expandable_segments:True\"\n\nGPUS_PER_NODE=$(nvidia-smi | grep NVIDIA | grep On | wc -l)\n\nCYBERTRON_PATH=\"/newcpfs/user/yuchen/llm/cybertron_dots3.0_swa\"\nMEGATRON_CORE_PATH=\"/newcpfs/user/yuchen/llm/megatron_dots3.0_swa\"\nexport PYTHONPATH=\"${CYBERTRON_PATH}:${MEGATRON_CORE_PATH}:${PYTHONPATH}\"\ncd \"${CYBERTRON_PATH}\"\n\nSAVE_DIR=\"${SAVE_ROOT}\"\nexport save_dir=\"${SAVE_DIR}/\"\nexport exp_name=\"${EXP_NAME}\"\nexport tensorboard_dir=\"${SAVE_DIR}/tensorboard/${EXP_NAME}\"\n\nmkdir -p \"${SAVE_DIR}/${EXP_NAME}\" \\\n         \"${SAVE_DIR}/${EXP_NAME}/loguru\" \\\n         \"${SAVE_DIR}/${EXP_NAME}/logs\" \\\n         \"${SAVE_DIR}/${EXP_NAME}/logs/runs/.hydra\"\n\nLOAD_DIR=\"${SAVE_DIR}/${EXP_NAME}\"\n\nDISTRIBUTED_ARGS=\"--nproc_per_node ${GPUS_PER_NODE} --nnodes ${WORLD_SIZE} --node_rank ${RANK} --master_addr ${MASTER_ADDR} --master_port ${MASTER_PORT}\"\nTRAIN_SCRIPT_PATH=\"${CYBERTRON_PATH}/examples/pretrain/lm/pretrain_deepseek_v2.py\"\n\nCPU_BIND_WRAPPER=\"${EXP_DIR}/launch_with_cpu_bind.py\"\nchmod +x \"${CPU_BIND_WRAPPER}\" 2>/dev/null || true\nnvidia-smi\n\nlogfile=\"${SAVE_DIR}/${EXP_NAME}/logs/rank-${RANK}-${WORLD_SIZE}-${EXP_NAME}-run.log\"\n\n# 方案A：只传 save/load/exp_name，架构参数完全由 yaml 决定\nHYDRA_FULL_ERROR=1 torchrun ${DISTRIBUTED_ARGS} ${TRAIN_SCRIPT_PATH} \\\n--config-path=\"${EXP_DIR}\" \\\n--config-name=\"${YAML_PATH}\" \\\nload_dir=\"${LOAD_DIR}\" save_dir=\"${SAVE_DIR}\" exp_name=\"${EXP_NAME}\" \\\ncybertron.finetune=false \\\ncybertron.no_load_rng=false \\\ncybertron.no_load_optim=false \\\ncybertron.override_opt_param_scheduler=true \\\ncybertron.use_checkpoint_opt_param_scheduler=false \\\ncybertron.tokenizer_model=/prodcpfs/user/xiaoming/models/dots_tokenizer \\\ncybertron.data_cache_path=\"/prodcpfs/user/data/save/data/lossalign/data_cache\" \\\ncybertron.distributed_timeout_minutes=900 \\\n2>&1 | tee \"${logfile}\"",
+    "UserId": "205965505064455254",
+    "UserVpc": {
+      "ExtendedCidrs": [
+        "10.39.160.0/20",
+        "10.39.144.0/24",
+        "10.39.128.0/20"
+      ],
+      "SecurityGroupId": "sg-t4n64rdhu76b1c41q263",
+      "SwitchId": "vsw-t4n7u35gb94u4d4eli2m9",
+      "VpcId": "vpc-t4nptn1gzsxxk04su5mpc"
+    },
+    "WorkspaceId": "262162",
+    "WorkspaceName": "Data_Agent"
+  }
+}

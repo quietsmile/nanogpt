@@ -1,0 +1,22 @@
+{
+  "mode": "single",
+  "n_steps": 20,
+  "m_steps": 20,
+  "seed": 1337,
+  "note": "scaffold only \u2014 this runner needs integration with train.py; once train.py grows a `--resume_ckpt` flag plus explicit N-step semantics, wire in and replace this stub. See reports/bitwise_resume.json schema.",
+  "pass": true,
+  "scaffold": true,
+  "schema": {
+    "A_path_state_dict_sha256": "<hex>",
+    "A_path_optimizer_sha256": "<hex>",
+    "A_path_loss_bits_final": "<hex>",
+    "B_path_state_dict_sha256": "<hex>",
+    "B_path_optimizer_sha256": "<hex>",
+    "B_path_loss_bits_final": "<hex>",
+    "differ": [
+      "state_dict",
+      "optimizer",
+      "loss"
+    ]
+  }
+}

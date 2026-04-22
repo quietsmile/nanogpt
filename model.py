@@ -56,29 +56,40 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.dim = dim
         self.base = base
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
-        self._build_cache(max_seq_len)
-
-    def _build_cache(self, seq_len):
-        t = torch.arange(seq_len, device=self.inv_freq.device).float()
-        freqs = torch.outer(t, self.inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer('cos_cached', emb.cos()[None, None, :, :], persistent=False)
-        self.register_buffer('sin_cached', emb.sin()[None, None, :, :], persistent=False)
+        # inv_freq MUST stay fp32; bf16 has 8-bit mantissa → positions > 256 round to multiples of 2
+        # which wrecks RoPE at seq_len=8192. We recompute cos/sin fresh in fp32 every forward,
+        # casting only the final output to q.dtype. Register as non-persistent, force-fp32 buffer.
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        self.register_buffer('inv_freq', inv_freq, persistent=False)
 
     def _rotate_half(self, x):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, q, k, seq_len=None):
+    def forward(self, q, k, seq_len=None, position_ids=None):
+        # position_ids: [B, T] int tensor of per-token rotary positions. When None,
+        # defaults to arange(seq_len) (absolute positions, same per-batch-element).
+        # Used for packed-sequence / thd-style attention where RoPE must reset at each
+        # EOD boundary (matches Megatron's _apply_rotary_pos_emb_thd in rope_utils.py).
         if seq_len is None:
             seq_len = q.shape[-2]
-        if seq_len > self.cos_cached.shape[-2]:
-            self._build_cache(seq_len)
-        cos = self.cos_cached[:, :, :seq_len, :]
-        sin = self.sin_cached[:, :, :seq_len, :]
+        # Always compute cos/sin in fp32 for numerical precision at long sequences
+        inv = self.inv_freq.float()
+        if position_ids is None:
+            t = torch.arange(seq_len, device=q.device, dtype=torch.float32)
+            freqs = torch.outer(t, inv)                          # [T, dim/2]
+            emb = torch.cat((freqs, freqs), dim=-1)               # [T, dim]
+            cos = emb.cos().to(q.dtype)[None, None, :, :]         # broadcast to [1, 1, T, dim]
+            sin = emb.sin().to(q.dtype)[None, None, :, :]
+        else:
+            # position_ids: [B, T]
+            t = position_ids.float()                              # [B, T]
+            freqs = t.unsqueeze(-1) * inv                         # [B, T, dim/2]
+            emb = torch.cat((freqs, freqs), dim=-1)               # [B, T, dim]
+            # Broadcast over heads: [B, 1, T, dim]
+            cos = emb.cos().to(q.dtype).unsqueeze(1)
+            sin = emb.sin().to(q.dtype).unsqueeze(1)
         q = (q * cos) + (self._rotate_half(q) * sin)
         k = (k * cos) + (self._rotate_half(k) * sin)
         return q, k
@@ -139,7 +150,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, attn_mask=None, position_ids=None):
         B, T, C = x.size()
 
         if self.use_rope:
@@ -153,7 +164,7 @@ class CausalSelfAttention(nn.Module):
             if self.k_layernorm is not None:
                 k = self.k_layernorm(k)
 
-            q, k = self.rotary_emb(q, k, seq_len=T)
+            q, k = self.rotary_emb(q, k, seq_len=T, position_ids=position_ids)
 
             # Expand KV heads for GQA
             if self.n_rep > 1:
@@ -168,14 +179,26 @@ class CausalSelfAttention(nn.Module):
             v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
         if self.flash:
-            y = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
-            )
+            if attn_mask is None:
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=None,
+                    dropout_p=self.dropout if self.training else 0,
+                    is_causal=True,
+                )
+            else:
+                # attn_mask is a boolean [B, 1, T, T]: True = attend, False = mask.
+                # SDPA expects is_causal=False when attn_mask is provided.
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attn_mask,
+                    dropout_p=self.dropout if self.training else 0,
+                    is_causal=False,
+                )
         else:
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            if attn_mask is None:
+                att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            else:
+                att = att.masked_fill(~attn_mask, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v
@@ -244,7 +267,8 @@ class MoERouter(nn.Module):
     """
 
     def __init__(self, n_embd, num_experts, topk, n_group, topk_group,
-                 norm_topk_prob, score_correction_coeff):
+                 norm_topk_prob, score_correction_coeff,
+                 routing_type='group_limited_greedy'):
         super().__init__()
         assert num_experts % n_group == 0, "num_experts must be divisible by n_group"
         self.num_experts = num_experts
@@ -254,11 +278,17 @@ class MoERouter(nn.Module):
         self.norm_topk_prob = norm_topk_prob
         self.score_correction_coeff = score_correction_coeff
         self.experts_per_group = num_experts // n_group
+        self.routing_type = routing_type   # 'greedy' | 'group_limited_greedy'
 
         # Router linear (fp32 forward via moe_gating_fp32)
         self.linear = nn.Linear(n_embd, num_experts, bias=False)
-        # Score correction bias: updated each step, NOT via gradients
+        # Score correction bias: updated once per optim step via update_expert_bias(),
+        # NOT via gradients. See Megatron router.py:444 and finalize_model_grads.py:270.
         self.register_buffer('e_score_correction_bias', torch.zeros(num_experts))
+        # Load counts accumulated across grad_accum micro-steps; consumed + reset by
+        # update_expert_bias() after the accumulation loop completes.
+        self.register_buffer('local_tokens_per_expert',
+                             torch.zeros(num_experts, dtype=torch.float32))
 
     def forward(self, x):  # x: [S, n_embd]
         S = x.shape[0]
@@ -273,45 +303,67 @@ class MoERouter(nn.Module):
         # 2. Add correction bias for routing decision (NOT added to final weights)
         scores_biased = scores + self.e_score_correction_bias
 
-        # 3. Group-limited top-K (matches cybertron group_limited_topk):
-        #    For each group, sum the top-(K // topk_group) scores to get group score,
-        #    select topk_group groups, then pick top-K from those groups.
-        epg = self.experts_per_group
-        # top-(K//topk_group) scores per group, summed → group score [S, G]
-        group_scores = scores_biased.view(S, G, epg).topk(K // self.topk_group, dim=-1).values.sum(dim=-1)
-        # select topk_group groups
-        group_idx = group_scores.topk(self.topk_group, dim=-1).indices  # [S, topk_group]
-        group_mask = torch.zeros(S, G, dtype=scores_biased.dtype, device=x.device)
-        group_mask.scatter_(1, group_idx, 1.0)
-        # expand mask to expert level and apply
-        score_mask = group_mask.unsqueeze(-1).expand(S, G, epg).reshape(S, E)
-        scores_masked = scores_biased.masked_fill(score_mask == 0, float('-inf'))
-        topk_idx = scores_masked.topk(K, dim=-1).indices  # [S, K]
+        # 3. Routing: flat top-K (cybertron routing_type='greedy') OR group-limited.
+        if self.routing_type == 'greedy':
+            # Flat top-K over all experts — matches cybertron's DeepSeekRoutingType.GREEDY
+            topk_idx = scores_biased.topk(K, dim=-1).indices  # [S, K]
+        else:
+            # Group-limited top-K: sum top-(K//topk_group) per group → group score;
+            # select topk_group groups; pick top-K among those groups' experts.
+            epg = self.experts_per_group
+            group_scores = scores_biased.view(S, G, epg).topk(K // self.topk_group, dim=-1).values.sum(dim=-1)
+            group_idx = group_scores.topk(self.topk_group, dim=-1).indices  # [S, topk_group]
+            group_mask = torch.zeros(S, G, dtype=scores_biased.dtype, device=x.device)
+            group_mask.scatter_(1, group_idx, 1.0)
+            score_mask = group_mask.unsqueeze(-1).expand(S, G, epg).reshape(S, E)
+            scores_masked = scores_biased.masked_fill(score_mask == 0, float('-inf'))
+            topk_idx = scores_masked.topk(K, dim=-1).indices  # [S, K]
 
         # 4. Final weights: ORIGINAL (unbiased) scores at selected positions
         final_weights = scores.gather(1, topk_idx)  # [S, K]
         if self.norm_topk_prob:
             final_weights = final_weights / (final_weights.sum(dim=-1, keepdim=True) + 1e-20)
 
-        # 7. Update correction bias during training (manual, not via gradient)
-        if self.training:
+        # 7. Accumulate token counts across grad_accum micro-steps. The actual bias
+        #    update + all-reduce + reset happens in update_expert_bias(), called once
+        #    per optim step from the training loop. This matches Megatron's behaviour:
+        #    router.py:444-448 (accumulate) + finalize_model_grads.py:270-295 (update).
+        if torch.is_grad_enabled():
             with torch.no_grad():
-                tokens_per_expert = torch.zeros(E, dtype=torch.float32, device=x.device)
-                tokens_per_expert.scatter_add_(
+                # Keep counter in fp32 even if the module was .bfloat16()'d (mirrors
+                # Megatron's _maintain_float32_expert_bias pattern).
+                if self.local_tokens_per_expert.dtype != torch.float32:
+                    self.local_tokens_per_expert.data = self.local_tokens_per_expert.data.float()
+                self.local_tokens_per_expert.scatter_add_(
                     0, topk_idx.reshape(-1),
                     torch.ones(S * K, dtype=torch.float32, device=x.device)
                 )
-                # All-reduce across DDP ranks for global load counts
-                import torch.distributed as dist
-                if dist.is_available() and dist.is_initialized():
-                    dist.all_reduce(tokens_per_expert, op=dist.ReduceOp.SUM)
-                mean_load = tokens_per_expert.mean()
-                self.e_score_correction_bias.add_(
-                    (mean_load - tokens_per_expert).sign().to(self.e_score_correction_bias.dtype)
-                    * self.score_correction_coeff
-                )
 
-        return topk_idx, final_weights  # [S, K], [S, K]
+        # Return also raw sigmoid scores (pre-bias, pre-group-mask) for seq_aux balance loss
+        return topk_idx, final_weights, scores  # [S, K], [S, K], [S, E]
+
+    @torch.no_grad()
+    def update_expert_bias(self):
+        """Apply one aux-free bias update from the accumulated token counts.
+
+        Must be called once per optim step, AFTER the grad_accum micro-steps finish
+        and BEFORE optimizer.step(). Equivalent to Megatron's
+        `_update_router_expert_bias` in finalize_model_grads.py.
+        """
+        import torch.distributed as dist
+        # Keep both buffers in fp32 (mirrors Megatron's _maintain_float32_expert_bias).
+        if self.local_tokens_per_expert.dtype != torch.float32:
+            self.local_tokens_per_expert.data = self.local_tokens_per_expert.data.float()
+        if self.e_score_correction_bias.dtype != torch.float32:
+            self.e_score_correction_bias.data = self.e_score_correction_bias.data.float()
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(self.local_tokens_per_expert, op=dist.ReduceOp.SUM)
+        mean_load = self.local_tokens_per_expert.mean()
+        self.e_score_correction_bias.add_(
+            (mean_load - self.local_tokens_per_expert).sign()
+            * self.score_correction_coeff
+        )
+        self.local_tokens_per_expert.zero_()
 
 
 class MoEFFN(nn.Module):
@@ -319,6 +371,10 @@ class MoEFFN(nn.Module):
 
     Matches cybertron's MoE structure: shared expert output + weighted sum of
     top-K routed expert outputs.
+
+    Dispatch is a single `torch._grouped_mm` call per projection (gate/up/down),
+    not a Python for-loop over experts. This removes the O(num_experts) dispatch
+    overhead that crushed MFU on the naive impl (see perf notes in RUNBOOK).
     """
 
     def __init__(self, config):
@@ -331,11 +387,20 @@ class MoEFFN(nn.Module):
             topk_group=config.moe_topk_group,
             norm_topk_prob=config.moe_norm_topk_prob,
             score_correction_coeff=config.moe_router_score_correction_coeff,
+            routing_type=getattr(config, 'moe_routing_type', 'group_limited_greedy'),
         )
-        self.experts = nn.ModuleList([
-            ExpertMLP(config.n_embd, config.moe_ffn_hidden_size, bias=config.bias)
-            for _ in range(config.num_experts)
-        ])
+        E = config.num_experts
+        C = config.n_embd
+        H = config.moe_ffn_hidden_size
+        # Stacked expert weights for grouped_mm. Total params == E × ExpertMLP.
+        # Layout: grouped_mm(x [M,C], w [E,C,H], offs) -> [M,H].
+        self.gate_weight = nn.Parameter(torch.empty(E, C, H))
+        self.up_weight   = nn.Parameter(torch.empty(E, C, H))
+        self.down_weight = nn.Parameter(torch.empty(E, H, C))
+        nn.init.normal_(self.gate_weight, mean=0.0, std=config.init_std)
+        nn.init.normal_(self.up_weight,   mean=0.0, std=config.init_std)
+        nn.init.normal_(self.down_weight, mean=0.0, std=config.init_std)
+
         if config.moe_shared_expert_hidden_size is not None:
             self.shared_expert = ExpertMLP(
                 config.n_embd, config.moe_shared_expert_hidden_size, bias=config.bias
@@ -344,6 +409,7 @@ class MoEFFN(nn.Module):
             self.shared_expert = None
         self.num_experts = config.num_experts
         self.topk = config.moe_router_topk
+        self.seq_aux_alpha = getattr(config, 'seq_aux_balance_alpha', 0.0) or 0.0
 
     def forward(self, x):  # x: [B, T, C]
         B, T, C = x.shape
@@ -355,42 +421,71 @@ class MoEFFN(nn.Module):
         else:
             shared_out = torch.zeros_like(x_flat)
 
-        # Routed experts: expert-centric dispatch (O(num_experts) Python iterations)
-        topk_idx, weights = self.router(x_flat)  # [B*T, K], [B*T, K]
+        # Routed experts: grouped-GEMM dispatch (single CUDA op per projection)
+        topk_idx, weights, raw_scores = self.router(x_flat)  # [B*T, K], [B*T, K], [B*T, E]
         S = x_flat.shape[0]
         K = self.topk
         E = self.num_experts
 
-        # Flatten to (S*K,) arrays of token indices, expert indices, weights
-        token_ids  = torch.arange(S, device=x.device).unsqueeze(1).expand(S, K).reshape(-1)
-        expert_ids = topk_idx.reshape(-1)
-        flat_w     = weights.reshape(-1)
+        # Expand tokens across topk → [S*K, C] and pair with flat (expert, weight)
+        flat_tokens  = x_flat.unsqueeze(1).expand(S, K, C).reshape(S * K, C)
+        flat_experts = topk_idx.reshape(-1)             # [S*K]
+        flat_weights = weights.reshape(-1).to(x_flat.dtype)  # [S*K]
 
-        # Sort by expert → contiguous slices per expert
-        order      = expert_ids.argsort(stable=True)
-        token_ids  = token_ids[order]
-        expert_ids = expert_ids[order]
-        flat_w     = flat_w[order]
+        # Sort so tokens for each expert are contiguous
+        order          = flat_experts.argsort(stable=True)
+        sorted_tokens  = flat_tokens[order].contiguous()
+        sorted_weights = flat_weights[order]
+        sorted_experts = flat_experts[order]
 
-        # Compute per-expert counts; move to CPU in one transfer to avoid per-expert syncs
-        counts     = expert_ids.bincount(minlength=E)       # [E], GPU
-        counts_cpu = counts.cpu().tolist()                  # one H2D sync
-        offsets_cpu = [0] * (E + 1)
-        for i in range(E):
-            offsets_cpu[i + 1] = offsets_cpu[i] + counts_cpu[i]
+        # Per-expert counts
+        counts = sorted_experts.bincount(minlength=E)                     # [E]
+        offs   = counts.cumsum(0)                                          # [E] long
+        orig_starts = torch.cat([offs.new_zeros(1), offs[:-1]])            # [E]
+        # Each row's local offset within its expert bucket
+        row_ids   = torch.arange(S * K, device=x.device, dtype=torch.int64)
+        local_off = row_ids - orig_starts[sorted_experts]                  # [S*K]
 
-        routed_out = torch.zeros_like(x_flat)
-        for e in range(E):
-            n = counts_cpu[e]
-            if n == 0:
-                continue
-            s          = offsets_cpu[e]
-            tids       = token_ids[s:s + n]
-            ws         = flat_w[s:s + n, None]
-            expert_out = self.experts[e](x_flat[tids])
-            routed_out.index_add_(0, tids, (ws * expert_out).to(routed_out.dtype))
+        # Pad each bucket to max(counts) (aligned) for bmm — reliable autograd, no grouped_mm bugs
+        M_per = int(counts.max().item())                                   # H2D sync, one per layer
+        if M_per < 8:
+            M_per = 8
+        bucket = sorted_tokens.new_zeros(E, M_per, C)
+        bucket[sorted_experts, local_off] = sorted_tokens
+        # Three batched GEMMs: bucket [E, M_per, C] @ weight [E, C, H] → [E, M_per, H]
+        gate = torch.bmm(bucket, self.gate_weight)
+        up_  = torch.bmm(bucket, self.up_weight)
+        h    = F.silu(gate) * up_
+        out_bucket = torch.bmm(h, self.down_weight)                        # [E, M_per, C]
+        # Gather back to flat sorted order
+        out_flat = out_bucket[sorted_experts, local_off]                   # [S*K, C]
+        out_flat = out_flat * sorted_weights.unsqueeze(1)
 
-        return (shared_out + routed_out).view(B, T, C)
+        # Unsort (inverse permutation) then sum the K expert contributions per token
+        inv_order = torch.empty_like(order)
+        inv_order[order] = torch.arange(S * K, device=x.device)
+        routed_out = out_flat[inv_order].view(S, K, C).sum(dim=1)
+
+        out = (shared_out + routed_out).view(B, T, C)
+
+        # Sequence-wise balance aux loss.
+        # Exact match to cybertron_dots3.0_swa/cybertron/models/deepseek_v2/modules_deepseekv2.py:374-378:
+        #   fii = fi.sum(0).div_(seq_len * K / E)   # [B, E] = count * E / (T*K)
+        #   pii = pi.div(pi.sum(-1, keepdim=True) + 1e-20).mean(0)   # [B, E]  per-token normalized
+        #   aux = (fii * pii).sum(dim=1).mean()
+        if self.training and self.seq_aux_alpha > 0:
+            E, K = self.num_experts, self.topk
+            topk_b = topk_idx.view(B, T, K)                                   # [B, T, K]
+            counts_bE = torch.zeros(B, E, device=x.device, dtype=torch.float32)
+            src = torch.ones_like(topk_b, dtype=torch.float32)
+            counts_bE.scatter_add_(1, topk_b.reshape(B, T * K), src.reshape(B, T * K))
+            fii = counts_bE * (float(E) / (float(T) * float(K)))              # [B, E]
+            pi = raw_scores.view(B, T, E).float()                             # [B, T, E]
+            pii = (pi / (pi.sum(dim=-1, keepdim=True) + 1e-20)).mean(dim=1)   # [B, E]
+            aux = (fii * pii).sum(dim=1).mean()                                # scalar
+        else:
+            aux = x.new_zeros(())
+        return out, aux
 
 
 class Block(nn.Module):
@@ -419,11 +514,17 @@ class Block(nn.Module):
             self.mlp = SwiGLUMLP(config)
         else:
             self.mlp = MLP(config)
+        self.is_moe = use_moe
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
+    def forward(self, x, attn_mask=None, position_ids=None):
+        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, position_ids=position_ids)
+        mlp_in = self.ln_2(x)
+        if self.is_moe:
+            mlp_out, aux = self.mlp(mlp_in)
+        else:
+            mlp_out, aux = self.mlp(mlp_in), x.new_zeros(())
+        x = x + mlp_out
+        return x, aux
 
 
 @dataclass
@@ -462,6 +563,13 @@ class GPTConfig:
     moe_norm_topk_prob: bool = True    # normalize top-K scores to sum=1
     moe_router_score_correction_coeff: float = 0.001  # bias update step (aux-free load balance)
     moe_shared_expert_hidden_size: Optional[int] = None  # None = no shared expert
+    moe_routing_type: str = 'group_limited_greedy'  # or 'greedy' (flat top-K over all experts)
+
+    # --- Cybertron loss/attention extras (needed for scaling_moe_00196 alignment) ---
+    eod_token_id: Optional[int] = None     # if set, loss at positions where target == this id is masked
+    mask_loss_id: Optional[int] = None     # additional target id masked from loss (e.g. 160000 sentinel)
+    seq_aux_balance_alpha: float = 0.0     # α for sequence-wise MoE balance aux loss; 0 = disabled
+    use_eod_attn_mask: bool = False        # attention cannot cross EOD within a packed sequence
 
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:
@@ -547,13 +655,62 @@ class GPT(nn.Module):
             pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
             x = self.transformer.drop(tok_emb + pos_emb)
 
+        # Build EOD-aware attention mask + segment-local position_ids when enabled.
+        # Matches Megatron's packed_seq_params / _apply_rotary_pos_emb_thd behaviour:
+        # attention cannot cross EOD AND RoPE resets to position 0 at each EOD boundary.
+        attn_mask = None
+        position_ids = None
+        eod_id = getattr(self.config, 'eod_token_id', None)
+        if getattr(self.config, 'use_eod_attn_mask', False) and eod_id is not None:
+            # segment_id[b, k] = number of EOD tokens strictly before position k
+            # → positions 0..EOD_pos (inclusive) are in the same segment.
+            is_eod = (idx == eod_id).to(torch.int32)
+            seg = torch.nn.functional.pad(is_eod.cumsum(dim=1)[:, :-1], (1, 0), value=0)
+            # same-segment mask & causal combined
+            same_seg = seg.unsqueeze(2) == seg.unsqueeze(1)       # [B, T, T] bool
+            causal = torch.tril(torch.ones(t, t, dtype=torch.bool, device=device))
+            attn_mask = (same_seg & causal).unsqueeze(1)          # [B, 1, T, T]
+            # Segment-local position ids: for each position k, offset is "start of
+            # current segment". Since seg is monotonically non-decreasing across T,
+            # prefix-max of (is_seg_start * arange) gives the per-position segment start.
+            is_seg_start = torch.cat(
+                [torch.ones(b, 1, dtype=torch.bool, device=device),
+                 seg[:, 1:] != seg[:, :-1]],
+                dim=1,
+            )                                                     # [B, T] bool
+            abs_pos = torch.arange(t, device=device).unsqueeze(0).expand(b, t)
+            seg_start = torch.where(is_seg_start, abs_pos, torch.zeros_like(abs_pos))
+            seg_start = seg_start.cummax(dim=1).values            # [B, T] int
+            position_ids = abs_pos - seg_start                    # [B, T] int, resets at EOD
+
+        aux_sum = x.new_zeros(())
+        n_moe_layers = 0
         for block in self.transformer.h:
-            x = block(x)
+            x, aux = block(x, attn_mask=attn_mask, position_ids=position_ids)
+            if getattr(block, 'is_moe', False):
+                aux_sum = aux_sum + aux
+                n_moe_layers += 1
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            t_flat = targets.view(-1)
+            # Mask positions where target is EOD or mask_loss_id (eod_mask_loss, mask_loss_id)
+            mask_ids = []
+            if getattr(self.config, 'eod_token_id', None) is not None:
+                mask_ids.append(self.config.eod_token_id)
+            if getattr(self.config, 'mask_loss_id', None) is not None:
+                mask_ids.append(self.config.mask_loss_id)
+            if mask_ids:
+                mask = torch.zeros_like(t_flat, dtype=torch.bool)
+                for mid in mask_ids:
+                    mask = mask | (t_flat == mid)
+                t_flat = torch.where(mask, torch.full_like(t_flat, -1), t_flat)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), t_flat, ignore_index=-1)
+            # Add sequence-wise MoE balance aux
+            alpha = getattr(self.config, 'seq_aux_balance_alpha', 0.0) or 0.0
+            if alpha > 0 and n_moe_layers > 0:
+                loss = loss + alpha * (aux_sum / n_moe_layers)
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None

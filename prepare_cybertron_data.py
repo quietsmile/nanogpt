@@ -153,7 +153,7 @@ def get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_sample_id, 
     else:
         tokens = tokens[:seq_len]
 
-    return tokens.astype(np.uint16)
+    return tokens.astype(np.int32)
 
 
 def _extract_dataset_worker(args):
@@ -190,7 +190,7 @@ def _extract_dataset_worker(args):
     pairs.sort()
 
     # Open output memmap for writing
-    out = np.memmap(out_path, dtype=np.uint16, mode='r+', shape=(n_total * SEQ_LENGTH,))
+    out = np.memmap(out_path, dtype=np.int32, mode='r+', shape=(n_total * SEQ_LENGTH,))
 
     for actual_id, i in pairs:
         tokens = get_sample_tokens_cached(indexed_ds, doc_idx, sample_idx, actual_id, SEQ_LENGTH)
@@ -242,7 +242,7 @@ def extract_train_data(n_samples, out_path):
 
     # Write output
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    out = np.memmap(out_path, dtype=np.uint16, mode='w+', shape=(n_samples * SEQ_LENGTH,))
+    out = np.memmap(out_path, dtype=np.int32, mode='w+', shape=(n_samples * SEQ_LENGTH,))
     print(f"Writing {n_samples:,} samples → {out_path} ({n_samples * SEQ_LENGTH * 2 / 1e9:.2f} GB)")
 
     import multiprocessing as mp
@@ -288,21 +288,21 @@ def extract_val_data(out_path, n_samples=2000):
         print(f"WARNING: Validation data not found at {VAL_DATA_PATH}")
         print("Creating minimal placeholder...")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        np.zeros(n_samples * SEQ_LENGTH, dtype=np.uint16).tofile(out_path)
+        np.zeros(n_samples * SEQ_LENGTH, dtype=np.int32).tofile(out_path)
         return
 
     indexed_ds = open_indexed_dataset(VAL_DATA_PATH)
     print(f"  Validation dataset: {len(indexed_ds)} docs")
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    out = np.memmap(out_path, dtype=np.uint16, mode='w+', shape=(n_samples * SEQ_LENGTH,))
+    out = np.memmap(out_path, dtype=np.int32, mode='w+', shape=(n_samples * SEQ_LENGTH,))
 
     written = 0
     doc_idx = 0
-    buf = np.array([], dtype=np.uint16)
+    buf = np.array([], dtype=np.int32)
 
     while written < n_samples and doc_idx < len(indexed_ds):
-        doc = indexed_ds.get(doc_idx).astype(np.uint16)
+        doc = indexed_ds.get(doc_idx).astype(np.int32)
         buf = np.concatenate([buf, doc])
         doc_idx += 1
 

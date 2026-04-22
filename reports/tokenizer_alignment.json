@@ -1,0 +1,259 @@
+{
+  "added_token_ids": [
+    151643,
+    151644,
+    151645,
+    151647,
+    151648,
+    151649,
+    151650,
+    151651,
+    151652,
+    151653,
+    151654,
+    151655,
+    151656,
+    151657,
+    151658,
+    151659
+  ],
+  "added_tokens": {
+    "151643": "<|endoftext|>",
+    "151644": "<|im_start|>",
+    "151645": "<|im_end|>",
+    "151647": "<|userprompt|>",
+    "151648": "<|endofuserprompt|>",
+    "151649": "<|response|>",
+    "151650": "<|endofresponse|>",
+    "151651": "<|system|>",
+    "151652": "<|endofsystem|>",
+    "151653": "<|observation|>",
+    "151654": "<|endofobservation|>",
+    "151655": "<|execution|>",
+    "151656": "<|endofexecution|>",
+    "151657": "<|reject-unknown|>",
+    "151658": "<|sec-cot|>",
+    "151659": "<|sec-end-cot|>"
+  },
+  "class": "Qwen2TokenizerFast",
+  "eos_token_id": 151643,
+  "eos_token": "<|endoftext|>",
+  "mask_loss_id": 160000,
+  "roundtrip": [
+    {
+      "input_sha256": "c0535e4be2b79ffd",
+      "input_len": 12,
+      "ids_len": 3,
+      "first_8_ids": [
+        9707,
+        1879,
+        0
+      ],
+      "last_4_ids": [
+        9707,
+        1879,
+        0
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "00cbf51217565b61",
+      "input_len": 50,
+      "ids_len": 16,
+      "first_8_ids": [
+        785,
+        3974,
+        13876,
+        38835,
+        34208,
+        916,
+        279,
+        15678
+      ],
+      "last_4_ids": [
+        18,
+        19,
+        20,
+        13
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "f447c659340004d4",
+      "input_len": 13,
+      "ids_len": 9,
+      "first_8_ids": [
+        108386,
+        3837,
+        99489,
+        6313,
+        100644,
+        104307,
+        88051,
+        52801
+      ],
+      "last_4_ids": [
+        104307,
+        88051,
+        52801,
+        1773
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "e0e21779bf2d7f84",
+      "input_len": 39,
+      "ids_len": 14,
+      "first_8_ids": [
+        750,
+        15229,
+        2075,
+        982,
+        262,
+        470,
+        856,
+        353
+      ],
+      "last_4_ids": [
+        220,
+        671,
+        4285,
+        198
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "2f6b922211e6bd2d",
+      "input_len": 25,
+      "ids_len": 14,
+      "first_8_ids": [
+        105063,
+        9519,
+        72858,
+        82847,
+        384,
+        45,
+        32340,
+        220
+      ],
+      "last_4_ids": [
+        18,
+        753,
+        31,
+        2
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "b257d9a2189729d9",
+      "input_len": 52,
+      "ids_len": 23,
+      "first_8_ids": [
+        27,
+        91,
+        318,
+        4906,
+        91,
+        29,
+        872,
+        198
+      ],
+      "last_4_ids": [
+        91,
+        29,
+        77091,
+        198
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "04c33f8159415f73",
+      "input_len": 25,
+      "ids_len": 6,
+      "first_8_ids": [
+        271,
+        256,
+        36372,
+        256,
+        1273,
+        2394
+      ],
+      "last_4_ids": [
+        36372,
+        256,
+        1273,
+        2394
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "0793f8955f254e3f",
+      "input_len": 24,
+      "ids_len": 12,
+      "first_8_ids": [
+        37523,
+        25,
+        11162,
+        248,
+        222,
+        144670,
+        26077,
+        25
+      ],
+      "last_4_ids": [
+        7851,
+        102,
+        19043,
+        33218
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "c2a908d98f5df987",
+      "input_len": 200,
+      "ids_len": 25,
+      "first_8_ids": [
+        69440,
+        69440,
+        69440,
+        69440,
+        69440,
+        69440,
+        69440,
+        69440
+      ],
+      "last_4_ids": [
+        69440,
+        69440,
+        69440,
+        69440
+      ],
+      "match": true,
+      "decode": null
+    },
+    {
+      "input_sha256": "e3b0c44298fc1c14",
+      "input_len": 0,
+      "ids_len": 0,
+      "first_8_ids": [],
+      "last_4_ids": [],
+      "match": true,
+      "decode": null
+    }
+  ],
+  "file_md5": {
+    "tokenizer.json": "7a3b91b49bb7201db0316dfd14379c8f",
+    "merges.txt": "e78882c2e224a75fa8180ec610bae243",
+    "tokenizer_config.json": "bbe1e95a157b2d7901759fba54258c93"
+  },
+  "vocab_size": 151643,
+  "len_with_added": 151660
+}

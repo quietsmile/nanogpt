@@ -1,0 +1,120 @@
+{
+  "blended_sample_count": 1572864059,
+  "consumed_by_run": 479040,
+  "n_datasets_in_blend": 116,
+  "n_datasets_in_yaml": 116,
+  "first_dataset_blend_vs_yaml": {
+    "blend": "/prodcpfs/data/text_data/pretrain_v3/business_zh_quiz_v0_pos_qwen_with_st",
+    "yaml": "/prodcpfs/data/text_data/pretrain_v3/business_zh_quiz_v0_pos_qwen_with_st"
+  },
+  "first_1024_pairs_sha256": "c7c752c069f4e41f0b9a71dde989fde9935a6060ae15043a77c2d41d844627b2",
+  "first_10_pairs": [
+    [
+      103,
+      0
+    ],
+    [
+      68,
+      0
+    ],
+    [
+      66,
+      0
+    ],
+    [
+      67,
+      0
+    ],
+    [
+      65,
+      0
+    ],
+    [
+      79,
+      0
+    ],
+    [
+      113,
+      0
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      103,
+      1
+    ],
+    [
+      111,
+      0
+    ]
+  ],
+  "last_8_pairs": [
+    [
+      66,
+      98577466
+    ],
+    [
+      67,
+      98577466
+    ],
+    [
+      11,
+      869883
+    ],
+    [
+      2,
+      53415652
+    ],
+    [
+      111,
+      47780288
+    ],
+    [
+      103,
+      245902510
+    ],
+    [
+      65,
+      98566497
+    ],
+    [
+      5,
+      30952037
+    ]
+  ],
+  "n_unique_datasets_in_train": 116,
+  "step0_sample": {
+    "dataset_id": 103,
+    "sample_id_in_blend": 0,
+    "actual_sample_id": 148349196,
+    "dataset_path": "/cpfs/2926428ee2463e44/user/dubi/binidx/github_0705_pre9th_score1_qwen_with_st",
+    "tokens_shape": [
+      8192
+    ],
+    "tokens_dtype": "int32",
+    "first_16_tokens": [
+      3135,
+      2164,
+      307,
+      8,
+      341,
+      286,
+      419,
+      16314,
+      3135,
+      2164,
+      307,
+      284,
+      3150,
+      3135,
+      2164,
+      307
+    ],
+    "sha256_first_1024": "a8c57547a4701fcbfdd1162ffb635a3add96daf9de80180faa9b41a5012e5b37",
+    "max_id": 151643,
+    "min_id": 1,
+    "n_eod": 11
+  }
+}

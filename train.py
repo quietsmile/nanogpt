@@ -169,9 +169,9 @@ data_dir = os.path.join('data', dataset)
 
 def get_batch(split):
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.int32, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.int32, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -195,16 +195,19 @@ def get_batch_sequential(split):
     global _seq_data, _seq_data_pos
     if split not in _seq_data:
         fname = 'train.bin' if split == 'train' else 'val.bin'
-        _seq_data[split] = np.memmap(os.path.join(data_dir, fname), dtype=np.uint16, mode='r')
+        _seq_data[split] = np.memmap(os.path.join(data_dir, fname), dtype=np.int32, mode='r')
 
     data = _seq_data[split]
     n_tokens = len(data)
 
-    # Each sample is block_size+1 tokens (block_size input + 1 target)
-    sample_stride = block_size + 1
+    # prepare_cybertron_data.py stores each cybertron blended sample as exactly
+    # block_size tokens (SEQ_LENGTH=8192). Input is sample[:], target = sample[1:]+next_sample[0].
+    # The last target token (from the next sample) is negligible noise (1/8192 of loss budget).
+    sample_stride = block_size
     n_samples = (n_tokens - 1) // sample_stride
 
-    # For train: interleave across DDP ranks so each rank reads distinct samples.
+    # Rank offset is applied at initialization (line 189: _seq_data_pos = {'train': ddp_rank * batch_size, ...}).
+    # Each call advances by world_size*batch_size so ranks stay interleaved: rank r reads r, r+W, r+2W, ...
     # For val: all ranks read the same data (averaged in estimate_loss).
     step = ddp_world_size * batch_size if (ddp and split == 'train') else batch_size
 
@@ -223,7 +226,8 @@ def get_batch_sequential(split):
     return x, y
 
 
-use_sequential = dataset.endswith('_cybertron') or dataset.endswith('_sequential')
+use_sequential = (dataset.endswith('_cybertron') or dataset.endswith('_sequential')
+                  or 'cybertron' in dataset)
 _get_batch = get_batch_sequential if use_sequential else get_batch
 
 # -----------------------------------------------------------------------------
@@ -261,6 +265,14 @@ model_args = dict(
     moe_norm_topk_prob=moe_norm_topk_prob,
     moe_router_score_correction_coeff=moe_router_score_correction_coeff,
     moe_shared_expert_hidden_size=moe_shared_expert_hidden_size,
+    # Alignment-critical behavior knobs — must flow from config to the model so
+    # resume+override works. If any of these are missing on the config namespace,
+    # GPTConfig defaults apply.
+    moe_routing_type=globals().get('moe_routing_type', 'group_limited_greedy'),
+    eod_token_id=globals().get('eod_token_id', None),
+    mask_loss_id=globals().get('mask_loss_id', None),
+    seq_aux_balance_alpha=globals().get('seq_aux_balance_alpha', 0.0),
+    use_eod_attn_mask=globals().get('use_eod_attn_mask', False),
 )
 
 _resume_batch = None  # set below when resuming from checkpoint
@@ -276,14 +288,24 @@ elif init_from == 'resume':
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size',
-              'n_kv_head', 'kv_channels', 'use_rope', 'rotary_base', 'use_rmsnorm', 'norm_eps',
-              'use_swiglu', 'ffn_hidden_size', 'tie_embeddings', 'init_std',
-              'qk_layernorm', 'disable_scaled_init_method',
-              'use_moe', 'moe_layer_freq', 'num_experts', 'moe_ffn_hidden_size',
-              'moe_router_topk', 'moe_n_group', 'moe_topk_group', 'moe_norm_topk_prob',
-              'moe_router_score_correction_coeff', 'moe_shared_expert_hidden_size']:
-        model_args[k] = checkpoint_model_args[k]
+    # Architectural keys that MUST match the ckpt (shape-affecting). These get
+    # overridden from the ckpt to guarantee state_dict compatibility.
+    _arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size',
+                  'n_kv_head', 'kv_channels', 'use_rope', 'rotary_base', 'use_rmsnorm',
+                  'norm_eps', 'use_swiglu', 'ffn_hidden_size', 'tie_embeddings',
+                  'init_std', 'qk_layernorm', 'disable_scaled_init_method',
+                  'use_moe', 'moe_layer_freq', 'num_experts', 'moe_ffn_hidden_size',
+                  'moe_router_topk', 'moe_n_group', 'moe_topk_group',
+                  'moe_norm_topk_prob', 'moe_router_score_correction_coeff',
+                  'moe_shared_expert_hidden_size']
+    for k in _arch_keys:
+        if k in checkpoint_model_args:
+            model_args[k] = checkpoint_model_args[k]
+    # Alignment-critical non-arch keys (routing algorithm, attn masks, loss masks,
+    # aux-loss coeffs). These MUST come from the CURRENT config file, not the ckpt
+    # — otherwise enabling a code-gap fix in the config has no effect on resumed
+    # training. Silently falling back to defaults is exactly what caused the v1/v2/v3
+    # runs to quietly use group_limited_greedy routing + no EOD mask.
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
     state_dict = checkpoint['model']
@@ -291,7 +313,10 @@ elif init_from == 'resume':
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    # strict=False so old ckpts (pre aux-free-bias fix) without the new
+    # `local_tokens_per_expert` buffer still load; the buffer is initialized
+    # to zeros in the MoERouter constructor, which is the correct start state.
+    model.load_state_dict(state_dict, strict=False)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
     # Restore pre-eval RNG + data state for bitwise-deterministic resume
@@ -323,7 +348,12 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 # Optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), adam_eps, device_type)
 if init_from == 'resume':
-    optimizer.load_state_dict(checkpoint['optimizer'])
+    _opt_state = checkpoint.get('optimizer')
+    if _opt_state and 'param_groups' in _opt_state:
+        optimizer.load_state_dict(_opt_state)
+    else:
+        if master_process:
+            print('resume: optimizer state empty/absent; using fresh AdamW state')
 checkpoint = None
 
 # Compile
@@ -333,8 +363,10 @@ if compile:
     model = torch.compile(model)
 
 if ddp:
-    # find_unused_parameters=True: MoE experts with 0 tokens in a batch have no gradient
-    model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
+    # find_unused_parameters=False: all experts get touched through grouped_mm ops
+    # (weights multiplied by 0 routing prob still flow through graph). Setting to True
+    # hurts MFU ~40% with no benefit on this MoE impl.
+    model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=False)
 
 # -----------------------------------------------------------------------------
 # LR scheduling
@@ -507,18 +539,30 @@ while True:
         break
 
     # Forward / backward with gradient accumulation
+    _acc_loss_sum = 0.0  # local sum of micro-batch losses for global logging
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
+            _acc_loss_sum += loss.detach().float().item()
             loss = loss / gradient_accumulation_steps
         X, Y = _get_batch('train')
         scaler.scale(loss).backward()
 
+    # Aux-free MoE bias: apply one sign() update per optim step using the token
+    # counts accumulated over the grad_accum micro-steps (matches Megatron's
+    # _update_router_expert_bias in finalize_model_grads.py).
+    from model import MoERouter
+    for _m in raw_model.modules():
+        if isinstance(_m, MoERouter):
+            _m.update_expert_bias()
+
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        _grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    else:
+        _grad_norm = torch.tensor(0.0)
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
@@ -526,14 +570,38 @@ while True:
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
+    # All-reduce mean across DP ranks so reported loss matches ref's global-batch mean
+    _local_mean = _acc_loss_sum / gradient_accumulation_steps
+    if ddp:
+        _t = torch.tensor(_local_mean, device=device)
+        torch.distributed.all_reduce(_t, op=torch.distributed.ReduceOp.AVG)
+        _global_mean_loss = _t.item()
+    else:
+        _global_mean_loss = _local_mean
+
     if iter_num % log_interval == 0 and master_process:
-        lossf = loss.item() * gradient_accumulation_steps
+        lossf = _global_mean_loss
         if local_iter_num >= 5:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
         consumed_samples = (iter_num + 1) * _eff_gbs
+        _gn = float(_grad_norm.item()) if hasattr(_grad_norm, 'item') else float(_grad_norm)
         print(f"iter {iter_num}: loss {lossf:.4f}, samples {consumed_samples:,}, "
-              f"time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+              f"time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, gn {_gn:.4f}")
+        # Structured JSON log for dashboard overlay (master only)
+        if master_process:
+            import json as _json
+            _log_path = os.path.join(out_dir, 'train_log.jsonl')
+            try:
+                with open(_log_path, 'a') as _f:
+                    _f.write(_json.dumps({
+                        'iter': iter_num, 'loss': float(lossf),
+                        'samples': int(consumed_samples),
+                        'dt_ms': float(dt*1000), 'mfu': float(running_mfu),
+                        'lr': float(lr), 'grad_norm': _gn,
+                    }) + '\n')
+            except Exception:
+                pass
     iter_num += 1
     local_iter_num += 1
 

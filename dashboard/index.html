@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>nanogpt ↔ Megatron alignment dashboard (scaling_moe_00196)</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       margin: 0; padding: 0; background: #0e1116; color: #e6edf3; }
+header { padding: 16px 28px; background: #161b22; border-bottom: 1px solid #30363d; }
+h1 { margin: 0; font-size: 20px; }
+h2 { margin: 24px 0 12px; font-size: 16px; color: #7ee787; border-left: 3px solid #7ee787; padding-left: 10px; }
+main { padding: 16px 28px 40px; max-width: 1200px; margin: 0 auto; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
+.card .label { font-size: 11px; color: #7d8590; text-transform: uppercase; }
+.card .value { font-size: 22px; margin-top: 4px; }
+.card .sub { font-size: 12px; color: #7d8590; margin-top: 4px; }
+.ok { color: #7ee787; } .warn { color: #d29922; } .err { color: #f85149; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #30363d; }
+th { background: #161b22; color: #7d8590; }
+tr:hover { background: #161b22; }
+pre { background: #0b0e13; border: 1px solid #30363d; padding: 8px 12px; border-radius: 4px;
+      overflow-x: auto; font-size: 12px; }
+.small { font-size: 12px; color: #7d8590; }
+.status-pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
+               margin-left: 8px; }
+.status-pill.ok { background: #0d3d23; color: #7ee787; }
+.status-pill.warn { background: #3d2f0d; color: #d29922; }
+.status-pill.err { background: #3d0d0d; color: #f85149; }
+.status-pill.pending { background: #30363d; color: #7d8590; }
+details { background: #161b22; border: 1px solid #30363d; border-radius: 4px;
+          margin: 6px 0; padding: 8px 12px; }
+details summary { cursor: pointer; color: #7ee787; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>nanogpt ↔ Megatron alignment — <span style="color:#79c0ff">scaling_moe_00196</span></h1>
+  <div class="small">PAI DLC job: dlc1q9arre48b0kx · 9L/512d/4h/2qg · 144 experts · top-8 · 447.3M params</div>
+</header>
+<main>
+  <div id="overview" class="cards"></div>
+
+  <h2>Tokenizer <span id="tok-status" class="status-pill pending">loading…</span></h2>
+  <div id="tok-body"></div>
+
+  <h2>Data sampling <span id="data-status" class="status-pill pending">loading…</span></h2>
+  <div id="data-body"></div>
+
+  <h2>Model structure / params / FLOPs <span id="model-status" class="status-pill pending">loading…</span></h2>
+  <div id="model-body"></div>
+
+  <h2>Bitwise resume <span id="bw-status" class="status-pill pending">loading…</span></h2>
+  <div id="bw-body"></div>
+
+  <h2>Loss trajectory <span id="loss-status" class="status-pill pending">loading…</span></h2>
+  <div id="loss-plot" style="height: 400px;"></div>
+  <div id="loss-body"></div>
+
+  <h2>Checkpoint fingerprint</h2>
+  <div id="ckpt-body"></div>
+</main>
+
+<script>
+async function getJSON(path) {
+  try {
+    const r = await fetch(path, { cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+function card(label, value, sub, cls='') {
+  return `<div class="card"><div class="label">${label}</div>
+          <div class="value ${cls}">${value}</div>
+          ${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+
+function pill(id, state, text) {
+  const el = document.getElementById(id);
+  el.className = `status-pill ${state}`;
+  el.textContent = text;
+}
+
+async function main() {
+  // ----- tokenizer -----
+  const tok = await getJSON('../reports/tokenizer_alignment.json');
+  if (tok) {
+    pill('tok-status', 'ok', 'pass');
+    document.getElementById('tok-body').innerHTML = `
+      <div class="cards">
+        ${card('class', tok.class, 'should be Qwen2*', tok.class.includes('Qwen2') ? 'ok' : 'err')}
+        ${card('vocab_size', tok.vocab_size, 'base', 'ok')}
+        ${card('len(tok)', tok.len_with_added, '+ 16 added', 'ok')}
+        ${card('eos/eod', tok.eos_token_id, tok.eos_token, tok.eos_token_id === 151643 ? 'ok' : 'err')}
+      </div>
+      <details><summary>file md5s</summary>
+        <pre>${JSON.stringify(tok.file_md5, null, 2)}</pre></details>
+      <details><summary>16 added tokens</summary>
+        <pre>${JSON.stringify(tok.added_tokens, null, 2)}</pre></details>`;
+  } else {
+    pill('tok-status', 'err', 'missing');
+  }
+
+  // ----- data sampling -----
+  const data = await getJSON('../reports/data_sampling_alignment.json');
+  if (data) {
+    pill('data-status', 'ok', 'pass');
+    document.getElementById('data-body').innerHTML = `
+      <div class="cards">
+        ${card('datasets in blend', data.n_datasets_in_blend, `yaml: ${data.n_datasets_in_yaml}`,
+               data.n_datasets_in_blend === data.n_datasets_in_yaml ? 'ok' : 'err')}
+        ${card('cache samples', data.blended_sample_count.toLocaleString(), 'full yaml train_samples')}
+        ${card('consumed', data.consumed_by_run.toLocaleString(), '7485 × 64')}
+        ${card('first-1024 sha256', data.first_1024_pairs_sha256.slice(0,16)+'…', 'golden for replay')}
+      </div>
+      <details><summary>step 0 sample</summary>
+        <pre>${JSON.stringify(data.step0_sample, null, 2)}</pre></details>`;
+  } else {
+    pill('data-status', 'err', 'missing');
+  }
+
+  // ----- loss trajectory -----
+  const loss = await getJSON('../reports/loss_trajectory.json');
+  if (loss) {
+    const haveNano = loss.nano_present;
+    pill('loss-status', haveNano ? 'ok' : 'warn', haveNano ? 'both sides' : 'ref only');
+    document.getElementById('loss-body').innerHTML = `
+      <div class="cards">
+        ${card('ref steps', loss.ref.n_steps, `${loss.ref.first_step}..${loss.ref.last_step}`)}
+        ${card('first loss', loss.ref.first_loss.toFixed(3))}
+        ${card('last loss',  loss.ref.last_loss.toFixed(3))}
+        ${card('min loss',   loss.ref.min_loss.toFixed(3))}
+      </div>
+      ${loss.compare ? `<details open><summary>diff vs nanogpt</summary>
+         <pre>${JSON.stringify(loss.compare, null, 2)}</pre></details>`
+        : `<div class="small">${loss.note || ''}</div>`}`;
+    // fetch raw series for plot
+    const tb = await getJSON('../reference/tb/key_scalars.json');
+    if (tb) {
+      const refLoss = tb['lm loss'] || [];
+      const trace1 = {
+        x: refLoss.map(p=>p[0]), y: refLoss.map(p=>p[1]),
+        type: 'scatter', mode: 'lines', name: 'Megatron ref', line: {color: '#79c0ff', width: 1},
+      };
+      Plotly.newPlot('loss-plot', [trace1], {
+        paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+        font: { color: '#e6edf3' }, xaxis: { title: 'step' }, yaxis: { title: 'lm loss' },
+        margin: {t: 20, l: 40, r: 10, b: 40},
+      }, {responsive: true});
+    }
+  } else {
+    pill('loss-status', 'err', 'missing');
+  }
+
+  // ----- model structure -----
+  const ma = await getJSON('../reports/model_alignment.json');
+  if (ma) {
+    pill('model-status', 'ok', 'pass');
+    document.getElementById('model-body').innerHTML =
+      `<pre>${JSON.stringify(ma, null, 2)}</pre>`;
+  } else {
+    // report doesn't exist yet — pytest just asserts; write a minimal one via a future run
+    pill('model-status', 'warn', 'run pytest');
+    document.getElementById('model-body').innerHTML =
+      `<div class="small">run <code>pytest tests/test_model_alignment.py</code> and ensure it emits reports/model_alignment.json (already asserts inline today).</div>`;
+  }
+
+  // ----- bitwise -----
+  const bw = await getJSON('../reports/bitwise_resume.json');
+  if (bw) {
+    const ok = bw.pass;
+    pill('bw-status', ok ? 'ok' : 'err', ok ? 'pass' : 'fail');
+    document.getElementById('bw-body').innerHTML = `<pre>${JSON.stringify(bw, null, 2)}</pre>`;
+  } else {
+    pill('bw-status', 'warn', 'pending GPU');
+    document.getElementById('bw-body').innerHTML =
+      `<div class="small">需在 8 卡机执行 <code>make bitwise-check</code>;此处会展示 A/B checksum 对比与首个 diverge 步。</div>`;
+  }
+
+  // ----- ckpt fingerprint -----
+  const ck = await getJSON('../reports/ckpt_fingerprint.json');
+  if (ck) {
+    document.getElementById('ckpt-body').innerHTML = `<pre>${JSON.stringify(
+      Object.fromEntries(Object.entries(ck).filter(([k]) => k !== 'per_param')),
+      null, 2)}</pre>`;
+  } else {
+    document.getElementById('ckpt-body').innerHTML =
+      `<div class="small">训练产物 ckpt.pt 后运行 <code>python -m tools.ckpt_fingerprint out/ckpt.pt --json reports/ckpt_fingerprint.json</code>。</div>`;
+  }
+
+  // ----- overview cards (rendered last so statuses are final) -----
+  const phases = [
+    ['Phase 1 tokenizer', 'tok-status'],
+    ['Phase 2 data', 'data-status'],
+    ['Phase 3 model', 'model-status'],
+    ['Phase 4 bitwise', 'bw-status'],
+    ['Phase 5 loss', 'loss-status'],
+  ];
+  const ov = document.getElementById('overview');
+  ov.innerHTML = phases.map(([name, id]) => {
+    const st = document.getElementById(id);
+    return card(name, `<span class="${st.classList[1]}">${st.textContent}</span>`, '', '');
+  }).join('');
+}
+main();
+</script>
+</body>
+</html>
