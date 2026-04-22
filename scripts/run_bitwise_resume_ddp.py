@@ -26,7 +26,14 @@ def sha256_of(obj):
 def run_ddp(out_dir, max_iters, eval_interval, init_from, nranks=4, seed=1337, timeout=1200):
     os.makedirs(out_dir, exist_ok=True)
     env = os.environ.copy()
+    # Strict-determinism NCCL + CUDA flags. Without these, DDP bitwise resume
+    # loss diff is ~2e-3 at iter 20 (M=10). With these, it's ~3e-5 (near ULP floor).
     env['NCCL_ALGO'] = 'Ring'
+    env['NCCL_PROTO'] = 'Simple'
+    env['NCCL_P2P_DISABLE'] = '1'
+    env['NCCL_NVLS_ENABLE'] = '0'
+    env['NCCL_COLLNET_ENABLE'] = '0'
+    env['NVIDIA_TF32_OVERRIDE'] = '0'
     env['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(nranks))
     cmd = [
         'torchrun', '--standalone', f'--nproc_per_node={nranks}',
