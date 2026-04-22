@@ -16,6 +16,15 @@ sys.path.insert(0, ROOT)
 from model import GPTConfig, GPT  # noqa: E402
 
 
+def _seed(s):
+    """CPU-only seed. _seed() also seeds every visible CUDA device,
+    which can fail with 'illegal memory access' if an earlier test in the same
+    pytest process polluted the CUDA context (the Megatron/Apex import chain
+    pulled in by test_data_sampling_alignment is the usual culprit). These
+    tests build CPU-only tiny models, so CUDA state is irrelevant."""
+    torch.default_generator.manual_seed(s)
+
+
 def _tiny_moe_config(**overrides):
     cfg = dict(
         block_size=16, vocab_size=200,
@@ -37,7 +46,7 @@ class TestEodMaskLoss(unittest.TestCase):
     def test_eod_masked_equals_ignore_index_loss(self):
         """After commit 076fb6d, nano masks loss at positions where INPUT (idx)
         is EOD — matching ref's `loss_mask[data == eod_token] = 0.0` semantics."""
-        torch.manual_seed(0)
+        _seed(0)
         cfg = _tiny_moe_config(eod_token_id=199)
         m = GPT(cfg); m.eval()
         idx = torch.randint(0, 199, (2, 16))
@@ -47,7 +56,7 @@ class TestEodMaskLoss(unittest.TestCase):
         _, loss_gap = m(idx, targets=tgt)
         # Manual baseline: set TARGETS at those input positions to -1
         cfg2 = _tiny_moe_config()
-        torch.manual_seed(0); m2 = GPT(cfg2); m2.eval()
+        _seed(0); m2 = GPT(cfg2); m2.eval()
         m2.load_state_dict(m.state_dict())
         tgt_masked = tgt.clone(); tgt_masked[idx == 199] = -1
         _, loss_base = m2(idx, targets=tgt_masked)
@@ -55,7 +64,7 @@ class TestEodMaskLoss(unittest.TestCase):
                         f"{loss_gap.item()} vs {loss_base.item()}")
 
     def test_mask_loss_id_masked(self):
-        torch.manual_seed(0)
+        _seed(0)
         cfg = _tiny_moe_config(mask_loss_id=199)
         m = GPT(cfg); m.eval()
         idx = torch.randint(0, 199, (2, 16))
@@ -64,7 +73,7 @@ class TestEodMaskLoss(unittest.TestCase):
         idx[0, 0] = 199; idx[1, 5] = 199
         _, loss_gap = m(idx, targets=tgt)
         cfg2 = _tiny_moe_config()
-        torch.manual_seed(0); m2 = GPT(cfg2); m2.eval()
+        _seed(0); m2 = GPT(cfg2); m2.eval()
         m2.load_state_dict(m.state_dict())
         tgt_masked = tgt.clone(); tgt_masked[idx == 199] = -1
         _, loss_base = m2(idx, targets=tgt_masked)
@@ -73,7 +82,7 @@ class TestEodMaskLoss(unittest.TestCase):
 
 class TestSeqAuxBalance(unittest.TestCase):
     def test_alpha_zero_matches_baseline(self):
-        torch.manual_seed(0)
+        _seed(0)
         cfg0 = _tiny_moe_config(seq_aux_balance_alpha=0.0)
         m = GPT(cfg0); m.train()
         idx = torch.randint(0, 200, (2, 16))
@@ -82,16 +91,16 @@ class TestSeqAuxBalance(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
 
     def test_alpha_positive_increases_loss(self):
-        torch.manual_seed(0)
+        _seed(0)
         cfg0 = _tiny_moe_config(seq_aux_balance_alpha=0.0)
         cfg1 = _tiny_moe_config(seq_aux_balance_alpha=1.0)  # large for sensitivity
-        torch.manual_seed(0); m0 = GPT(cfg0); m0.train()
-        torch.manual_seed(0); m1 = GPT(cfg1); m1.train()
+        _seed(0); m0 = GPT(cfg0); m0.train()
+        _seed(0); m1 = GPT(cfg1); m1.train()
         m1.load_state_dict(m0.state_dict())
         idx = torch.randint(0, 200, (2, 16))
         tgt = torch.randint(0, 200, (2, 16))
-        torch.manual_seed(42); _, l0 = m0(idx, targets=tgt)
-        torch.manual_seed(42); _, l1 = m1(idx, targets=tgt)
+        _seed(42); _, l0 = m0(idx, targets=tgt)
+        _seed(42); _, l1 = m1(idx, targets=tgt)
         self.assertGreater(float(l1 - l0), 0, "alpha>0 should add non-zero aux term")
         # aux value = (l1 - l0) / alpha. For uniform sigmoid ≈0.5 and uniform routing,
         # expected ≈ 0.5 * (E/K) * (K/E) = 0.5 → so l1-l0 with alpha=1 should be ≈0.5
@@ -101,7 +110,7 @@ class TestSeqAuxBalance(unittest.TestCase):
 
 class TestAccurateEodAttnMask(unittest.TestCase):
     def test_post_eod_isolated_from_pre_eod(self):
-        torch.manual_seed(0)
+        _seed(0)
         cfg = _tiny_moe_config(eod_token_id=199, use_eod_attn_mask=True)
         m = GPT(cfg); m.eval()
         # Place EOD at middle of sequence
@@ -120,7 +129,7 @@ class TestAccurateEodAttnMask(unittest.TestCase):
 
     def test_no_mask_leaks(self):
         """Sanity: without the mask flag, same perturbation does change post-EOD output."""
-        torch.manual_seed(0)
+        _seed(0)
         cfg = _tiny_moe_config(eod_token_id=199, use_eod_attn_mask=False)
         m = GPT(cfg); m.eval()
         idx_a = torch.randint(0, 199, (1, 16))

@@ -91,9 +91,12 @@ class RotaryEmbedding(nn.Module):
         emb = torch.cat((freqs, freqs), dim=-1)                   # [..., dim] fp32
         # TE's fused_apply_rotary_pos_emb expects [S, B, H, D] (sbhd) format with
         # freqs [S, 1, 1, D]. We receive q,k in [B, H, S, D] → permute to sbhd.
+        # The fused kernel is CUDA-only and silently returns NaN on CPU tensors,
+        # so also gate on q.is_cuda — lets CPU unit tests fall through to the
+        # unfused path.
         try:
             from megatron.core.extensions.transformer_engine import fused_apply_rotary_pos_emb
-            use_fused = (position_ids is None)  # fused path uses shared freq for all batches
+            use_fused = (position_ids is None) and q.is_cuda
         except ImportError:
             use_fused = False
         if use_fused:
