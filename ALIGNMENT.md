@@ -116,16 +116,36 @@ Fix: train.py 改 `stride=block_size`，target 取 `[s+1, s+block_size+1]`。
 - mb=1 受限于 lm_head logits tensor 内存（`[mb×T, V=152064]` 在 mb≥2 会 OOM）
 - 7485 步全跑 ~4.5h
 
-## 残留 diff（未完全解释）
+## 残留 diff — 已定位为 forward kernel diff
 
-iter 2000-7000 中段 nano 系统性地比 ref 高 0.006-0.009 nat（0.2-0.3%）。方向系统性（不是随机噪声），候选源头（未确认）：
+**Test A（`scripts/diag_weights_vs_forward.py --mode A`）定位 0.014 nat 的 pure forward-kernel-diff**：
 
-1. **bf16 attention 矩阵累加顺序** — PyTorch SDPA vs TE flash-attn-2 在 Q@K^T / Attn@V 的 bf16 累加路径
-2. **MoE token dispatcher 差异** — nano dense×mask vs ref allgather dispatcher
-3. **Adam 实现细节** — PyTorch fused AdamW vs apex/TE FusedAdam 的 bf16 update 顺序
-4. **gradient_accumulation_fusion** — ref 用 Megatron 的 fused grad accumulation 到 fp32 buffer，nano 走 PyTorch 默认
+加载 ref iter N 的 ckpt 到 nano，在 iter N+1 的 batch（ref 用同一 ckpt 实际 forward 过的 batch）上跑 nano forward，和 ref 的 logged loss 比：
 
-需要换 kernel（flash-attn-2 / TE）或 fp32 训练才能压到 ±0.001 nat。
+| ref ckpt | batch iter | nano_fwd | ref_logged | Δ |
+|---|---|---|---|---|
+| 1497 | 1498 | 3.3978 | 3.3873 | +0.0105 |
+| 2994 | 2995 | 3.3709 | 3.3553 | +0.0157 |
+| 4491 | 4492 | 3.0715 | 3.0572 | +0.0143 |
+| 5988 | 5989 | 3.0725 | 3.0575 | +0.0150 |
+
+**avg Δ = +0.0139 nat, stddev = 0.0023**
+
+同权重、同 batch、只换 forward kernel → nano SDPA 系统性比 TE flash-attn-2 高 0.014 nat。方向在 4 个独立 ckpt 上 100% 一致。
+
+这个 +0.014 nat 是 **2×** 训练中 20-iter rolling avg 残留 diff（+0.007 nat）—— 意味着 trained weights 其实几乎相同，中段漂移完全由 forward kernel 差异贡献（且 training 过程还略微对冲了一部分）。
+
+### 根因候选（按优先级）
+
+1. **PyTorch SDPA flash backend vs TE flash-attn-2 的 Q@K^T / Attn@V bf16 tiling 顺序** — 最可能
+2. MoE dense×mask vs ref allgather dispatcher 的 bf16 scatter/gather 累加顺序
+3. Adam 内部 bf16 update 顺序（PyTorch fused AdamW vs apex FusedAdam）
+
+### 要压到 ±0.001 nat 的可能路径
+
+- 把 nano attention 换成 TE flash-attn-2 同一套 kernel（最直接）
+- 或在 attention 里用 manual fp32 matmul 绕开 bf16 累加
+- 或整个训练转 fp32
 
 ## 关键文件
 

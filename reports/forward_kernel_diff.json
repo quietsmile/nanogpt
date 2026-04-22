@@ -1,0 +1,16 @@
+{
+  "test": "matched-pair forward kernel diff (Test A)",
+  "method": "load ref iter N ckpt into nano, forward on iter N+1 batch (that ref actually forwarded with those weights), compare to ref's logged single-iter loss",
+  "pairs": [
+    {"ckpt_iter": 1497, "batch_iter": 1498, "nano_fwd": 3.397807, "ref_logged": 3.387269, "delta": 0.010538},
+    {"ckpt_iter": 2994, "batch_iter": 2995, "nano_fwd": 3.370941, "ref_logged": 3.355274, "delta": 0.015667},
+    {"ckpt_iter": 4491, "batch_iter": 4492, "nano_fwd": 3.071536, "ref_logged": 3.057246, "delta": 0.014290},
+    {"ckpt_iter": 5988, "batch_iter": 5989, "nano_fwd": 3.072479, "ref_logged": 3.057512, "delta": 0.014967}
+  ],
+  "summary": {
+    "avg_delta_nat": 0.013866,
+    "stddev": 0.002288,
+    "direction": "nano SDPA systematically higher than ref TE flash-attn-2",
+    "conclusion": "Pure forward-kernel-diff alone is 2x larger than mid-training rolling-avg residual (+0.007). Trained weights nearly identical; the residual is fully explained by kernel."
+  }
+}
