@@ -24,7 +24,7 @@ cfg = GPTConfig(block_size=8192, vocab_size=152064, n_layer=9, n_head=4, n_embd=
     moe_n_group=8, moe_topk_group=1, moe_norm_topk_prob=True,
     moe_router_score_correction_coeff=0.001, moe_shared_expert_hidden_size=160,
     moe_routing_type="greedy", eod_token_id=151643, mask_loss_id=160000,
-    seq_aux_balance_alpha=0.0, use_eod_attn_mask=False)  # disable aux to isolate main-loss grad
+    seq_aux_balance_alpha=0.0001, use_eod_attn_mask=False)  # ref's alpha
 model = GPT(cfg).cuda()
 model.load_state_dict(sd, strict=False)
 model.train()
@@ -42,8 +42,8 @@ optimizer = model.configure_optimizers(
 data = np.memmap('/root/nanogpt/data/cybertron_baseline/train.bin', dtype=np.int32, mode='r')
 block = 8192
 GBS = 64
-MBS = 1  # memory-limited: lm_head needs [mb, T, V]=18GB fp32 for mb=4
-NUM_MB = GBS // MBS  # 64 microbatches
+MBS = 1
+NUM_MB = GBS // MBS
 EOD = 151643
 
 def gather_batch(start_offset):
@@ -55,7 +55,7 @@ def gather_batch(start_offset):
 print("=" * 60)
 print("STEP 1: Forward iter 5989 (iter_5988 ckpt)")
 print("=" * 60)
-batch_5989 = gather_batch(5988 * 64)  # offsets 383232..383295
+batch_5989 = gather_batch(5988 * 64)
 
 # Simulate ref-style: MBS=4 samples per microbatch, NUM_MB=16 microbatches
 total_loss = 0.0
@@ -112,6 +112,20 @@ for i in range(len(model.transformer.h)):
     bp = list(model.transformer.h[i].parameters())
     print(f"  block {i}: {gn(bp):.6f}")
 
+# Try excluding MoE expert weights (gate/up/down) — Megatron may put these in separate optimizer
+moe_expert_params = []
+for blk in model.transformer.h:
+    if hasattr(blk.mlp, 'gate_weight'):
+        moe_expert_params += [blk.mlp.gate_weight, blk.mlp.up_weight, blk.mlp.down_weight]
+moe_expert_set = set(id(p) for p in moe_expert_params)
+non_moe_expert_params = [p for p in all_params if id(p) not in moe_expert_set]
+gn_no_experts = gn(non_moe_expert_params)
+gn_only_experts = gn(moe_expert_params)
+print(f"\n  ALL = {gn_all:.6f}")
+print(f"  ONLY moe_expert weights = {gn_only_experts:.6f}")
+print(f"  excl moe_expert = {gn_no_experts:.6f}")
+print(f"  excl wte+lm+experts = {gn([p for p in all_params if id(p) not in moe_expert_set and all(p is not e for e in wte_params + lm_head_params)]):.6f}")
+
 # Apply standard clipping over all params (matches nano training)
 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 print(f"  clipped to 1.0; computed (all): {grad_norm:.6f}")
@@ -131,7 +145,7 @@ model.eval()
 print("\n" + "=" * 60)
 print("STEP 3: Forward iter 5990 (post-optim-step weights)")
 print("=" * 60)
-batch_5990 = gather_batch(5989 * 64)  # offsets 383296..383359
+batch_5990 = gather_batch(5989 * 64)
 total_loss_5990 = 0.0
 for mb_idx in range(NUM_MB):
     x_list = [batch_5990[mb_idx*MBS + b][0] for b in range(MBS)]
