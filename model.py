@@ -515,14 +515,14 @@ class MoEFFN(nn.Module):
         # scatter_add back to token positions. This matches Megatron's unpermute
         # path: `output.scatter_add_(0, sorted_indices, permuted_tokens * probs)`
         # (bf16-sum order differs from per-token K-wise sum, affects loss at ULP level).
-        out_flat = out_bucket[sorted_experts, local_off]                   # [S*K, C] bf16
-        out_flat = out_flat * sorted_weights.unsqueeze(1).to(out_flat.dtype)  # weight in bf16 for ordering
-        # sorted_indices[i] = which token t in original [S] this permuted position belongs to
-        sorted_token_ids = row_ids.div(K, rounding_mode='floor')[order]    # token id per permuted row
-        routed_out = out_bucket.new_zeros(S, C)                            # [S, C] bf16
+        # Weighted sum in fp32 to match TE's moe_unpermute precision.
+        out_flat = out_bucket[sorted_experts, local_off].float()           # [S*K, C] fp32
+        out_flat = out_flat * sorted_weights.unsqueeze(1).float()          # fp32 * fp32
+        sorted_token_ids = row_ids.div(K, rounding_mode='floor')[order]
+        routed_out = torch.zeros(S, C, dtype=torch.float32, device=x.device)  # fp32 accumulator
         routed_out.scatter_add_(0, sorted_token_ids.unsqueeze(1).expand(-1, C), out_flat)
-
-        out = (shared_out + routed_out).view(B, T, C)
+        # Cast to bf16 only at final combine
+        out = (shared_out.float() + routed_out).to(x_flat.dtype).view(B, T, C)
 
         # Sequence-wise balance aux loss.
         # Exact match to cybertron_dots3.0_swa/cybertron/models/deepseek_v2/modules_deepseekv2.py:374-378:
