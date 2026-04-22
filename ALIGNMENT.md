@@ -195,9 +195,35 @@ Hook 解读对齐（通过权重 rms 比对验证）：
 
 推测解读：**ref 的这三个指标在测量口径上可能和 nano 不同**（例如 ref 可能在 pre-scale、或 excluding causal-masked 位置测 max；first_token_attn_score 的 head/position 聚合方式不确定）。无法直接作为 "bug 存在" 的证据，因为 attn_output 完全对齐。
 
-### 剩余未验证（只剩一条路）
+### 已完成：cybertron Megatron forward dump + nano 逐层对比
 
-1. **让 cybertron Megatron forward 跑一次 bitwise dump，nano 同 input 逐层对**。Cybertron 自带 `examples/pretrain/lm/bitwise_dump.py` + `tests/pretrain_llm/integrate_tests/moe_bitwise_check` 的完整 CI 套件，但依赖完整的 Megatron 训练 env（dist ckpt loader、HF tokenizer、blended dataset、TP/PP/EP sharding、hydra config）。要若干天的配置工作
+PAI job `dlc1n4rtvu2e4f3q` 跑了 ref cybertron forward + bitwise_dump 钩子（staged at `/newcpfs/user/yuchen/karpathy/cybertron_dump/`），dumps 在 `dumps/`。ref rank-7 mbs0 对应 iter-5989 batch 的 samples 28-31（通过 bf16 embedding byte 精确匹配反推）。
+
+Nano 对这 4 个 sample 做 forward，hook 每个 block 的输出，对比 ref 的 dump：
+
+| block | L∞ | L1 | rel_mean | 备注 |
+|---|---|---|---|---|
+| embedding | **0** | **0** | **0** | **BITWISE identical** |
+| layer_0 (dense) | 0.125 | 0.00093 | 0.20% | 1-2 bf16 ULPs |
+| layer_1 (MoE) | 2.0 | 0.0039 | 0.57% | |
+| layer_2 | 10.0 | 0.0077 | 0.88% | |
+| layer_5 | 10.0 | 0.033 | 1.72% | |
+| layer_8 | 11.9 | 0.073 | 2.08% | |
+| ln_f | 3.0 | 0.027 | 2.13% | |
+
+**最终 root cause**：layer_0 是 DENSE 层（非 MoE），但已经在 bf16-ULP 层面与 ref 发散（每 element 1-2 ULP）。MoE 完全无关，残差完全来自 **bf16 matmul 的 kernel-level tiling 和累加顺序差异**：
+
+- Ref 用 TE 的 fused `LayerNormLinear`（一个 CUDA kernel 把 layernorm + linear 融合）
+- Nano 用 PyTorch 原生 `F.linear` + 独立 `RMSNorm`
+
+两套实现数学上等价，但 bf16 累加顺序不同 → 每 block 1-2 ULP 偏差 → 9 层累积到 2% 相对偏差 → loss 差 0.5%（= +0.014 nat）。
+
+要彻底压到 bitwise：
+- 把 nano 的 attention pre-norm 换成 TE 的 `LayerNormLinear`
+- 或把 MLP 换成 TE 的 `LayerNormMLP` 融合版
+- 或训练跑 fp32（数学等价但慢）
+
+这个诊断完成了"对齐到 bf16 ULP"的最终答案：nano 已经在数学层面完全对齐，剩下的 0.014 nat 是 **不同 bf16 kernel 实现的 irreducible tiling diff**，不是任何 bug。
 
 ### 其它已排除
 

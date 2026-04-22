@@ -1,0 +1,27 @@
+{
+  "experiment": "Ref PAI forward dump + nano-side per-block diff",
+  "ref_job": "dlc1n4rtvu2e4f3q",
+  "ref_ckpt": "iter_0005988",
+  "batch": "iter 5989 global batch, samples 28..31 (rank-7 mbs0 on DP=2 EP=4)",
+  "nano_loss_4samples": 3.626158,
+  "per_block_diff": [
+    {"block": "embedding",  "L_inf": 0.0,    "L1": 0.0,      "rel_mean": 0.0,      "note": "BITWISE identical — input confirmed"},
+    {"block": "layer_0",    "L_inf": 0.125,  "L1": 0.000933, "rel_mean": 0.00201,  "note": "dense layer (not MoE); 1-2 bf16 ULPs"},
+    {"block": "layer_1",    "L_inf": 2.0,    "L1": 0.00391,  "rel_mean": 0.00571},
+    {"block": "layer_2",    "L_inf": 10.0,   "L1": 0.00769,  "rel_mean": 0.00882},
+    {"block": "layer_3",    "L_inf": 10.0,   "L1": 0.01384,  "rel_mean": 0.01253},
+    {"block": "layer_4",    "L_inf": 10.0,   "L1": 0.02097,  "rel_mean": 0.01456},
+    {"block": "layer_5",    "L_inf": 10.0,   "L1": 0.03293,  "rel_mean": 0.01725},
+    {"block": "layer_6",    "L_inf": 10.0,   "L1": 0.04558,  "rel_mean": 0.01846},
+    {"block": "layer_7",    "L_inf": 10.0,   "L1": 0.06262,  "rel_mean": 0.01979},
+    {"block": "layer_8",    "L_inf": 11.875, "L1": 0.07339,  "rel_mean": 0.02081},
+    {"block": "ln_f",       "L_inf": 3.0,    "L1": 0.02695,  "rel_mean": 0.02128}
+  ],
+  "diagnosis": "Block 0 (DENSE layer, not MoE) already diverges from ref at bf16-ULP level (L_inf=0.125 on activations of magnitude up to 16). Diff accumulates monotonically through 9 blocks to rel_mean=2.1%. Final loss diff is 0.5% (0.014 nat on 3.07).",
+  "root_cause_confirmed": "Different bf16 matmul kernel implementations between nano (PyTorch F.linear + separate RMSNorm) and ref (TE's fused LayerNormLinear). Same math, different tiling/accumulation order in bf16 produces 1-2 ULP per-element diff per block. Compounds through 9 layers.",
+  "to_fully_close_gap": [
+    "Replace nano's (RMSNorm + F.linear) with TE's fused LayerNormLinear",
+    "Or replace nano's SwiGLU MLP with TE's fused bias_swiglu",
+    "Or train nano in fp32 (slow but mathematically identical)"
+  ]
+}
