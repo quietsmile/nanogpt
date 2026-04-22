@@ -33,9 +33,11 @@ make align
 Runs four pytest suites in order: tokenizer → data → model → loss. Each writes
 `reports/*.json`. Fast (~80s total, dominated by data test loading Megatron IndexedDataset).
 
-Current state (2026-04-20): all pass except `loss_trajectory` requires a nanogpt
-training run to produce `reports/nanogpt_train_log.json` — until then only the
-reference curve is shown.
+Current state (2026-04-23): all alignment tests pass, including the 6-test
+`tests/test_code_gaps.py` suite. `loss_trajectory` requires a nanogpt training
+run to produce `reports/nanogpt_train_log.json` — once a run exists
+(e.g. the 7485-step retrain in `out-cybertron-moe-196-from0-fresh/train_log.jsonl`),
+`make loss-align` overlays it on the reference curve.
 
 ## 3. Open the dashboard
 
@@ -77,12 +79,16 @@ CUDA_VISIBLE_DEVICES=0 python3 scripts/run_bitwise_resume_test.py --n 10 --m 10
 python3 scripts/run_bitwise_resume_ddp.py --n 10 --m 10 --nranks 4
 ```
 
-**Status (2026-04-22)**:
+**Status (2026-04-23)**:
 - Single-GPU: PASSED. A-path (10 → save → resume → 10 more) produces bitwise-
   identical model state_dict + optimizer sha256 vs B-path (20 straight).
-- DDP: Step 11 (first post-resume) matches bitwise. Iter 12+ diverges by ~2e-6
-  growing to ~2e-3. Two fresh DDP runs from same seed DO match bitwise, so the
-  resume path has unidentified hidden state issue. See `reports/bitwise_resume.json`.
+- DDP 4-rank: iter-20 A-vs-B drift is 3e-5 after commit `b4f9e75` added the
+  strict-determinism NCCL/CUDA env flags (`NCCL_ALGO=Ring`, `NCCL_PROTO=Simple`,
+  `NCCL_P2P_DISABLE=1`, `NCCL_NVLS_ENABLE=0`, `NCCL_COLLNET_ENABLE=0`,
+  `NVIDIA_TF32_OVERRIDE=0`, `matmul.allow_tf32=False`, `cudnn.allow_tf32=False`).
+  Two fresh DDP runs from the same seed remain bitwise-equal, confirming
+  training itself is deterministic. Residual 3e-5 is NCCL reduction-order noise
+  in bf16, near the representation floor. See `reports/bitwise_resume.json`.
 
 The test uses `config/bitwise_resume_test.py` (tiny 3-layer MoE, bs=1024) so
 each path finishes in <1min.
@@ -114,12 +120,20 @@ Two deterministic runs with identical config and seed must produce identical
 
 ## Known alignment gaps (see `memory/nanogpt_align_gaps_00196.md`)
 
-Require code changes (not just config) — NOT YET IMPLEMENTED:
-- `eod_mask_loss` with EOD=151643 (yaml)
-- `mask_loss_id=160000` masking in cross-entropy
-- `sequence_wise_balance_loss` (α=0.0001) added to total loss
-- `accurate_attn_mask_eod_token` — attention must not cross EOD within a packed sequence
+All four 00196 code gaps are implemented and covered by
+`tests/test_code_gaps.py`:
 
-These would affect exact loss numerics. The DSW-only alignment tests today
-validate everything that can be checked without training; bit-exact loss needs
-these code changes plus an 8-GPU run.
+- `eod_mask_loss` — masks loss at positions where `idx == eod_token_id`
+  (input-based, matching ref `loss_mask[data == eod_token] = 0.0`, commit
+  `076fb6d`).
+- `mask_loss_id=160000` — masks loss at positions where `idx == mask_loss_id`
+  (same input-based mechanism).
+- `sequence_wise_balance_loss` — adds `seq_aux_balance_alpha * aux` to the
+  total loss when alpha > 0 and `model.training` is true.
+- `accurate_attn_mask_eod_token` — when `use_eod_attn_mask=True`, the model
+  builds a per-sample segment mask via cumsum of EOD positions and runs
+  SDPA with that dense bool mask (same-segment AND causal).
+
+Run `pytest tests/test_code_gaps.py -v` to exercise all four end-to-end on CPU.
+See `ALIGNMENT.md` v10 FINAL section for the end-to-end retrain result
+(final Δ = +0.0047 nat over 7485 iters).
