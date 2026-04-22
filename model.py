@@ -510,36 +510,30 @@ class MoEFFN(nn.Module):
             # Expert compute via grouped GEMM (gate/up fused)
             # Build per-expert fused weights [E, 2H, C] and [E, C, H] once per call —
             # TODO cache if perf matters. For now, reinstantiate.
-            # Use F.linear per-expert on contiguous slices (matches te.GroupedLinear
-            # bitwise since F.linear == te.Linear, but more stable across TE versions)
-            if not hasattr(self, '_te_fc1_w'):
-                fc1_w = torch.cat(
-                    [self.gate_weight.transpose(1, 2), self.up_weight.transpose(1, 2)],
-                    dim=1,
-                ).contiguous()  # [E, 2H, C]
-                fc2_w = self.down_weight.transpose(1, 2).contiguous()  # [E, C, H]
-                self._te_fc1_w = fc1_w
-                self._te_fc2_w = fc2_w
+            # Use te.GroupedLinear for experts (matches ref's fused grouped_gemm)
+            H_ffn = self.gate_weight.shape[-1]
+            if not hasattr(self, '_gl_fc1'):
+                self._gl_fc1 = _te.GroupedLinear(
+                    num_gemms=E, in_features=C, out_features=2*H_ffn, bias=False,
+                    params_dtype=torch.float32, device=x.device,
+                )
+                self._gl_fc2 = _te.GroupedLinear(
+                    num_gemms=E, in_features=H_ffn, out_features=C, bias=False,
+                    params_dtype=torch.float32, device=x.device,
+                )
+                # Copy nano weights into per-expert weights (gate_weight [E,C,H], up_weight [E,C,H], down_weight [E,H,C])
+                with torch.no_grad():
+                    for e in range(E):
+                        gate_e = self.gate_weight[e].T.contiguous()  # [H, C]
+                        up_e = self.up_weight[e].T.contiguous()      # [H, C]
+                        fc1_e = torch.cat([gate_e, up_e], dim=0)     # [2H, C]
+                        getattr(self._gl_fc1, f'weight{e}').data.copy_(fc1_e.float())
+                        getattr(self._gl_fc2, f'weight{e}').data.copy_(self.down_weight[e].T.contiguous().float())
             m_splits = routing_map.sum(dim=0).tolist()
-            ffn_h = self.gate_weight.shape[-1]
-            h12 = torch.empty(permuted.shape[0], 2*ffn_h, dtype=permuted.dtype, device=x.device)
-            start = 0
-            for e, m in enumerate(m_splits):
-                if m == 0:
-                    continue
-                end = start + m
-                h12[start:end] = F.linear(permuted[start:end], self._te_fc1_w[e])
-                start = end
+            h12 = self._gl_fc1(permuted, m_splits=m_splits)
             gate, up = h12.chunk(2, dim=-1)
             h_act = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
-            out_perm = torch.empty(permuted.shape[0], C, dtype=permuted.dtype, device=x.device)
-            start = 0
-            for e, m in enumerate(m_splits):
-                if m == 0:
-                    continue
-                end = start + m
-                out_perm[start:end] = F.linear(h_act[start:end], self._te_fc2_w[e])
-                start = end
+            out_perm = self._gl_fc2(h_act, m_splits=m_splits)
             # Unpermute with fused probs-weighted merge
             routed_out = _te.moe_unpermute(
                 out_perm, row_id_map, merging_probs=probs,
