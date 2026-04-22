@@ -517,9 +517,23 @@ function renderBitwise() {
       `<div class="small">需在 8 卡机执行 <code>make bitwise-check</code>；此处会展示 A/B checksum 对比与首个 diverge 步。</div>`;
     return;
   }
-  const ok = b.pass;
-  pill('bw-status', ok === true ? 'ok' : ok === false ? 'err' : 'warn',
-       ok === true ? 'pass' : ok === false ? 'fail' : 'scaffold');
+  // New schema: {single_gpu: {pass, ...}, ddp_4rank: {pass, ...}, ...}
+  // Legacy schema: {pass, mode, ...}
+  let sgPass, ddpPass, summaryText;
+  if ('single_gpu' in b || 'ddp_4rank' in b) {
+    sgPass = b.single_gpu && b.single_gpu.pass;
+    ddpPass = b.ddp_4rank && b.ddp_4rank.pass;
+    if (sgPass && ddpPass) summaryText = 'pass (single+ddp)';
+    else if (sgPass && ddpPass === false) summaryText = 'single pass · ddp diverge';
+    else if (sgPass) summaryText = 'single pass';
+    else summaryText = 'fail';
+    const pillState = sgPass ? (ddpPass === false ? 'warn' : 'ok') : 'err';
+    pill('bw-status', pillState, summaryText);
+  } else {
+    const ok = b.pass;
+    pill('bw-status', ok === true ? 'ok' : ok === false ? 'err' : 'warn',
+         ok === true ? 'pass' : ok === false ? 'fail' : 'scaffold');
+  }
   document.getElementById('bw-body').innerHTML = `<pre>${esc(JSON.stringify(b, null, 2))}</pre>`;
 }
 
