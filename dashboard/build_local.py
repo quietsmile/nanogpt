@@ -519,15 +519,18 @@ function renderBitwise() {
   }
   // New schema: {single_gpu: {pass, ...}, ddp_4rank: {pass, ...}, ...}
   // Legacy schema: {pass, mode, ...}
+  // pass can be true/false or a string like "near-bitwise (bf16 floor)".
+  const isPass = (v) => v === true || (typeof v === 'string' && /pass|near-bitwise/i.test(v));
   let sgPass, ddpPass, summaryText;
   if ('single_gpu' in b || 'ddp_4rank' in b) {
-    sgPass = b.single_gpu && b.single_gpu.pass;
-    ddpPass = b.ddp_4rank && b.ddp_4rank.pass;
-    if (sgPass && ddpPass) summaryText = 'pass (single+ddp)';
-    else if (sgPass && ddpPass === false) summaryText = 'single pass · ddp diverge';
+    const rawDdp = b.ddp_4rank && b.ddp_4rank.pass;
+    sgPass = isPass(b.single_gpu && b.single_gpu.pass);
+    ddpPass = isPass(rawDdp);
+    if (sgPass && ddpPass) summaryText = (rawDdp === true) ? 'pass (single+ddp)' : 'pass (single + ddp near-floor)';
+    else if (sgPass && rawDdp === false) summaryText = 'single pass · ddp diverge';
     else if (sgPass) summaryText = 'single pass';
     else summaryText = 'fail';
-    const pillState = sgPass ? (ddpPass === false ? 'warn' : 'ok') : 'err';
+    const pillState = sgPass ? (ddpPass ? 'ok' : 'warn') : 'err';
     pill('bw-status', pillState, summaryText);
   } else {
     const ok = b.pass;
