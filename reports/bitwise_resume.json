@@ -1,22 +1,38 @@
 {
-  "mode": "single",
-  "n_steps": 20,
-  "m_steps": 20,
-  "seed": 1337,
-  "note": "scaffold only \u2014 this runner needs integration with train.py; once train.py grows a `--resume_ckpt` flag plus explicit N-step semantics, wire in and replace this stub. See reports/bitwise_resume.json schema.",
-  "pass": true,
-  "scaffold": true,
-  "schema": {
-    "A_path_state_dict_sha256": "<hex>",
-    "A_path_optimizer_sha256": "<hex>",
-    "A_path_loss_bits_final": "<hex>",
-    "B_path_state_dict_sha256": "<hex>",
-    "B_path_optimizer_sha256": "<hex>",
-    "B_path_loss_bits_final": "<hex>",
-    "differ": [
-      "state_dict",
-      "optimizer",
-      "loss"
-    ]
-  }
+  "single_gpu": {
+    "mode": "single",
+    "n_steps": 10,
+    "m_steps": 10,
+    "seed": 1337,
+    "pass": true,
+    "config": "config/bitwise_resume_test.py",
+    "A_model_sha": "10579e8cfc0a...",
+    "B_model_sha": "10579e8cfc0a...",
+    "A_optim_sha": "7b202129de7e...",
+    "B_optim_sha": "7b202129de7e...",
+    "note": "model state_dict + optimizer state + iter_num all bitwise-equal between A-path (train 10 -> save -> resume -> 10 more) and B-path (train 20 straight)."
+  },
+  "ddp_4rank": {
+    "mode": "ddp",
+    "nranks": 4,
+    "n_steps": 10,
+    "m_steps": 10,
+    "seed": 1337,
+    "pass": false,
+    "config": "config/bitwise_resume_test.py",
+    "A_model_sha": "40b638245d44...",
+    "B_model_sha": "f967725764d8...",
+    "bitwise_until_iter": 11,
+    "first_diff_iter": 12,
+    "diff_iter_12": 2e-6,
+    "diff_iter_20": 2e-3,
+    "fresh_run_determinism_verified": true,
+    "note": "Two fresh DDP runs from same seed are bitwise-equal, so DDP training itself is deterministic across runs. Resume path produces ~2e-6 drift starting iter 12 after load. Per-rank state (RNG + seq_data_pos + X/Y) is captured correctly (iter 11 loss matches bitwise) but subsequent step weights diverge. Open investigation."
+  },
+  "fixes_landed": [
+    "per-rank RNG + seq_data_pos + prefetched X/Y via dist.all_gather_object",
+    "per-rank restore from _per_rank[rank] slot on resume",
+    "RNG restore moved post-DDP-wrap"
+  ],
+  "commits": ["0c63f67", "f139761"]
 }
