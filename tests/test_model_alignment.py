@@ -95,7 +95,8 @@ class TestModelStructure(unittest.TestCase):
                      and '.bias' not in n.split('.')[-1].lower()  # skip unused .bias registered buffers
                      or 'e_score_correction_bias' in n]
         # Keep only non-buffer params; nanogpt buffers to exclude explicitly:
-        buffers_to_skip = {'rotary_emb.inv_freq', 'rotary_emb.cos_cached', 'rotary_emb.sin_cached'}
+        buffers_to_skip = {'rotary_emb.inv_freq', 'rotary_emb.cos_cached', 'rotary_emb.sin_cached',
+                           'router.local_tokens_per_expert'}
         nano_keys = [n for n in self.model.state_dict().keys()
                      if not any(s in n for s in buffers_to_skip)]
         missing = [n for n in nano_keys if n not in self.name_map]
