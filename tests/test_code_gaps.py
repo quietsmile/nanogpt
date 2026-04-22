@@ -35,20 +35,21 @@ def _tiny_moe_config(**overrides):
 
 class TestEodMaskLoss(unittest.TestCase):
     def test_eod_masked_equals_ignore_index_loss(self):
+        """After commit 076fb6d, nano masks loss at positions where INPUT (idx)
+        is EOD — matching ref's `loss_mask[data == eod_token] = 0.0` semantics."""
         torch.manual_seed(0)
         cfg = _tiny_moe_config(eod_token_id=199)
         m = GPT(cfg); m.eval()
         idx = torch.randint(0, 199, (2, 16))
         tgt = torch.randint(0, 199, (2, 16))
-        # Place EOD at a few positions
-        tgt[0, 3] = 199; tgt[1, 7] = 199; tgt[1, 8] = 199
-        # With gap: eod masked
+        # Place EOD in the INPUT at a few positions (ref-compatible semantics)
+        idx[0, 3] = 199; idx[1, 7] = 199; idx[1, 8] = 199
         _, loss_gap = m(idx, targets=tgt)
-        # Manual baseline: set those positions to -1 on a no-gap config
+        # Manual baseline: set TARGETS at those input positions to -1
         cfg2 = _tiny_moe_config()
         torch.manual_seed(0); m2 = GPT(cfg2); m2.eval()
         m2.load_state_dict(m.state_dict())
-        tgt_masked = tgt.clone(); tgt_masked[tgt == 199] = -1
+        tgt_masked = tgt.clone(); tgt_masked[idx == 199] = -1
         _, loss_base = m2(idx, targets=tgt_masked)
         self.assertTrue(torch.allclose(loss_gap, loss_base, atol=1e-6),
                         f"{loss_gap.item()} vs {loss_base.item()}")
@@ -59,12 +60,13 @@ class TestEodMaskLoss(unittest.TestCase):
         m = GPT(cfg); m.eval()
         idx = torch.randint(0, 199, (2, 16))
         tgt = torch.randint(0, 199, (2, 16))
-        tgt[0, 0] = 199; tgt[1, 5] = 199
+        # Place mask_loss_id in INPUT positions (matches ref input-based masking)
+        idx[0, 0] = 199; idx[1, 5] = 199
         _, loss_gap = m(idx, targets=tgt)
         cfg2 = _tiny_moe_config()
         torch.manual_seed(0); m2 = GPT(cfg2); m2.eval()
         m2.load_state_dict(m.state_dict())
-        tgt_masked = tgt.clone(); tgt_masked[tgt == 199] = -1
+        tgt_masked = tgt.clone(); tgt_masked[idx == 199] = -1
         _, loss_base = m2(idx, targets=tgt_masked)
         self.assertTrue(torch.allclose(loss_gap, loss_base, atol=1e-6))
 
