@@ -313,10 +313,10 @@ class MoERouter(nn.Module):
 
         # 1. Compute scores in fp32 (moe_gating_fp32=True): cast both input and weight to fp32
         logits = F.linear(x.float(), self.linear.weight.float())  # [S, E], fp32
-        scores = torch.sigmoid(logits).to(x.dtype)                # [S, E], original dtype
+        scores = torch.sigmoid(logits)                            # [S, E], fp32 — cybertron keeps fp32 through gate weights
 
         # 2. Add correction bias for routing decision (NOT added to final weights)
-        scores_biased = scores + self.e_score_correction_bias
+        scores_biased = scores + self.e_score_correction_bias.float()
 
         # 3. Routing: flat top-K (cybertron routing_type='greedy') OR group-limited.
         if self.routing_type == 'greedy':
@@ -334,8 +334,9 @@ class MoERouter(nn.Module):
             scores_masked = scores_biased.masked_fill(score_mask == 0, float('-inf'))
             topk_idx = scores_masked.topk(K, dim=-1).indices  # [S, K]
 
-        # 4. Final weights: ORIGINAL (unbiased) scores at selected positions
-        final_weights = scores.gather(1, topk_idx)  # [S, K]
+        # 4. Final weights: ORIGINAL (unbiased) scores at selected positions. KEEP FP32
+        # to match cybertron's path where weighted-sum of expert outputs is done in fp32.
+        final_weights = scores.gather(1, topk_idx)  # [S, K], fp32
         if self.norm_topk_prob:
             final_weights = final_weights / (final_weights.sum(dim=-1, keepdim=True) + 1e-20)
 
@@ -445,7 +446,8 @@ class MoEFFN(nn.Module):
         # Expand tokens across topk → [S*K, C] and pair with flat (expert, weight)
         flat_tokens  = x_flat.unsqueeze(1).expand(S, K, C).reshape(S * K, C)
         flat_experts = topk_idx.reshape(-1)             # [S*K]
-        flat_weights = weights.reshape(-1).to(x_flat.dtype)  # [S*K]
+        # Keep weights in fp32 to match cybertron's weighted-sum precision
+        flat_weights = weights.reshape(-1).float()      # [S*K], fp32
 
         # Sort so tokens for each expert are contiguous
         order          = flat_experts.argsort(stable=True)
@@ -472,16 +474,17 @@ class MoEFFN(nn.Module):
         up_  = torch.bmm(bucket, self.up_weight)
         h    = F.silu(gate) * up_
         out_bucket = torch.bmm(h, self.down_weight)                        # [E, M_per, C]
-        # Gather back to flat sorted order
-        out_flat = out_bucket[sorted_experts, local_off]                   # [S*K, C]
-        out_flat = out_flat * sorted_weights.unsqueeze(1)
+        # Gather back to flat sorted order. Promote to fp32 for gate-weighted sum
+        # to match cybertron's token_dispatcher.token_unpermutation path.
+        out_flat = out_bucket[sorted_experts, local_off].float()           # [S*K, C] fp32
+        out_flat = out_flat * sorted_weights.unsqueeze(1)                  # fp32 * fp32
 
         # Unsort (inverse permutation) then sum the K expert contributions per token
         inv_order = torch.empty_like(order)
         inv_order[order] = torch.arange(S * K, device=x.device)
-        routed_out = out_flat[inv_order].view(S, K, C).sum(dim=1)
+        routed_out = out_flat[inv_order].view(S, K, C).sum(dim=1)          # fp32 sum
 
-        out = (shared_out + routed_out).view(B, T, C)
+        out = (shared_out.float() + routed_out).to(x_flat.dtype).view(B, T, C)
 
         # Sequence-wise balance aux loss.
         # Exact match to cybertron_dots3.0_swa/cybertron/models/deepseek_v2/modules_deepseekv2.py:374-378:
