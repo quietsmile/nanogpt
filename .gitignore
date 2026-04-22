@@ -19,6 +19,7 @@ reports/short_window/
 reports/nanogpt_train_log.jsonl
 reports/nanogpt_train_bg.log
 reports/nano_train_resume*.log
+reports/bitwise_resume_scaffold_out.json
 
 # alignment report build output (rebuild locally via `python dashboard/refresh_runs.py --rebuild`)
 dashboard/alignment_report.html

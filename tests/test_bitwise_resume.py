@@ -28,7 +28,14 @@ import unittest
 import torch
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# Canonical report — never overwritten by the scaffold runner. Real measurements
+# live here (sha256 of state_dict/optim, A-vs-B drift, etc.). Updated manually
+# or by a future real runner, not by the scaffold.
 REPORT = os.path.join(ROOT, 'reports', 'bitwise_resume.json')
+# Scaffold runner output — the current stub runner writes here so it stops
+# clobbering the canonical report on every pytest run. Once the runner is
+# wired into train.py properly, this can merge back into REPORT.
+SCAFFOLD_OUT = os.path.join(ROOT, 'reports', 'bitwise_resume_scaffold_out.json')
 DIVERGENCE = os.path.join(ROOT, 'reports', 'bitwise_resume_divergence.json')
 
 
@@ -50,12 +57,12 @@ class TestBitwiseResume(unittest.TestCase):
         env = os.environ.copy()
         env['CUDA_VISIBLE_DEVICES'] = '0'
         cmd = [sys.executable, runner, '--n-steps', '20', '--m-steps', '20',
-               '--out', REPORT, '--mode', 'single']
+               '--out', SCAFFOLD_OUT, '--mode', 'single']
         r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
         print("STDOUT:", r.stdout[-2000:])
         print("STDERR:", r.stderr[-2000:])
         self.assertEqual(r.returncode, 0, "runner failed")
-        with open(REPORT) as f:
+        with open(SCAFFOLD_OUT) as f:
             result = json.load(f)
         if result.get('scaffold'):
             self.skipTest('runner is a scaffold — train.py N-step/resume flags not wired yet')
@@ -67,12 +74,12 @@ class TestBitwiseResume(unittest.TestCase):
         env['NCCL_ALGO'] = 'Ring'  # deterministic all-reduce order
         cmd = ['torchrun', '--standalone', '--nproc_per_node=4',
                runner, '--n-steps', '10', '--m-steps', '10',
-               '--out', REPORT, '--mode', 'ddp']
+               '--out', SCAFFOLD_OUT, '--mode', 'ddp']
         r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=900)
         print("STDOUT:", r.stdout[-2000:])
         print("STDERR:", r.stderr[-2000:])
         self.assertEqual(r.returncode, 0, "DDP runner failed")
-        with open(REPORT) as f:
+        with open(SCAFFOLD_OUT) as f:
             result = json.load(f)
         if result.get('scaffold'):
             self.skipTest('runner is a scaffold — train.py N-step/resume flags not wired yet')
