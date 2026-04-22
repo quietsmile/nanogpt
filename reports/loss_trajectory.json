@@ -1,4 +1,5 @@
 {
+  "note_on_nano_series": "The nano series below is a 500-iter stub produced before the v10 kernel-alignment fixes (notably a97ce75 fused_apply_rotary_pos_emb). It is NOT the final alignment data. The authoritative end-to-end retrain is 7485 iters, stored on the remote GPU box at /root/nanogpt/out-cybertron-moe-196-from0-fresh/train_log.jsonl. Last-100-iter mean there: nano=2.853937, ref=2.849259, Δ=+0.0047 nat. See ALIGNMENT.md v10 FINAL section and memory/nanogpt_alignment_done.md.",
   "ref": {
     "n_steps": 7485,
     "first_step": 1,
@@ -12,7 +13,8 @@
   "nano": {
     "n_steps": 501,
     "first_loss": 11.917884826660156,
-    "last_loss": 6.318890571594238
+    "last_loss": 6.318890571594238,
+    "source": "reports/nanogpt_train_log.jsonl (500-iter stub, pre-v10 fixes)"
   },
   "compare": {
     "overlap": 500,
