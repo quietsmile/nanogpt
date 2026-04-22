@@ -3,9 +3,10 @@
 # Source yaml: /prodcpfs/user/data/GitLab/pretrain_scaling_ladder/scaling_moe_00196.yaml
 # Megatron ckpt for shape validation:
 #   /prodcpfs/user/yuchen/scaling_exp/auto_test/scaling_moe_00196/iter_0001497
-# Alignment gaps vs cybertron_moe_198.py: arch (9L/512d/4h/2qg vs 16L/656d/8h/4qg),
-#   full LR schedule, global_batch 64 vs 128, tokenizer dots vs Qwen,
-#   plus model/train.py changes for eod_mask_loss + mask_loss_id + seq_aux balance.
+# Diffs vs cybertron_moe_198.py: arch (9L/512d/4h/2qg vs 16L/656d/8h/4qg),
+#   full LR schedule, global_batch 64 vs 128, tokenizer dots vs Qwen.
+#   All four 00196 code gaps (eod_mask_loss, mask_loss_id, seq_aux balance,
+#   accurate_attn_mask_eod_token) are implemented — see tests/test_code_gaps.py.
 #
 # Architecture (from Megatron state_dict, iter_0001497):
 #   n_layer=9 (0 dense + 1-8 MoE)
@@ -74,10 +75,10 @@ moe_router_score_correction_coeff = 0.001
 moe_shared_expert_hidden_size = 160
 moe_routing_type = 'greedy'  # ref uses flat top-K over all experts (yaml: moe_router_load_balancing_type=greedy)
 
-# New flags (require model.py/train.py changes — see tests/test_model_alignment.py)
-eod_token_id = 151643         # EOD token for eod_mask_loss + accurate attn mask
-mask_loss_id = 160000          # extra token id excluded from loss
-seq_aux_balance_alpha = 0.0001 # sequence_wise_balance_loss_alpha
+# 00196 code-gap flags — all wired in model.py/train.py, covered by tests/test_code_gaps.py
+eod_token_id = 151643         # mask loss where idx == EOD (ref loss_mask[data == eod] = 0.0)
+mask_loss_id = 160000          # extra token id excluded from loss (same input-based mechanism)
+seq_aux_balance_alpha = 0.0001 # sequence_wise_balance_loss_alpha (only applied while model.training)
 routed_scaling_factor = 1.0
 
 # Optimizer
