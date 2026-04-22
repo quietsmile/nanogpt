@@ -539,7 +539,8 @@ class MoEFFN(nn.Module):
                 out_perm, row_id_map, merging_probs=probs,
                 restore_shape=x_flat.shape, map_type='mask',
             )
-            out = (shared_out + routed_out).view(B, T, C)
+            # Fp32 sum then cast (matches nano's non-TE path)
+            out = (shared_out.float() + routed_out.float()).to(x_flat.dtype).view(B, T, C)
             # Return per Block.forward expectation: (out, aux)
             if self.training and self.seq_aux_alpha > 0:
                 # Skip aux for now when using TE path (only affects training)
