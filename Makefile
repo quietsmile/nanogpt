@@ -12,7 +12,7 @@ reference-pull:
 	@echo "[ok] reference/$(JOB_ID).job.json"
 
 # ---- Alignment test suite (runs on DSW, no GPU) ----
-align: tokenizer-align data-align model-align loss-align
+align: tokenizer-align data-align model-align code-gaps-align loss-align
 
 tokenizer-align:
 	$(PY) -m pytest tests/test_tokenizer_alignment.py -v
@@ -22,6 +22,9 @@ data-align:
 
 model-align:
 	$(PY) -m pytest tests/test_model_alignment.py -v
+
+code-gaps-align:
+	$(PY) -m pytest tests/test_code_gaps.py -v
 
 loss-align:
 	$(PY) -m pytest tests/test_loss_trajectory.py -v
@@ -39,5 +42,5 @@ dashboard:
 prepare-data-196:
 	$(PY) prepare_cybertron_data.py --exp 196
 
-.PHONY: reference-pull align tokenizer-align data-align model-align loss-align \
-        bitwise-check dashboard prepare-data-196
+.PHONY: reference-pull align tokenizer-align data-align model-align \
+        code-gaps-align loss-align bitwise-check dashboard prepare-data-196
