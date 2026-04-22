@@ -27,9 +27,10 @@
     "RMSNorm / RoPE precision (already fp32)",
     "MoE expert bias not loaded (verified 8 layers x 144 loaded)"
   ],
-  "remaining_suspects": [
+  "remaining_suspects_historical": [
     "MoE routing/dispatch SEMANTIC difference (not bf16 rounding) — nano dense-mask vs ref allgather",
     "Weight converter edge case — subtle layout/scale off for some tensor",
     "Loss mask computation — ref's loss_mask logic for EOD/packed-doc boundaries vs nano's eod_mask_loss+mask_loss_id"
-  ]
+  ],
+  "resolution_v10_2026_04_23": "Root cause was neither MoE routing, weight converter, nor loss mask — it was the RoPE implementation. Commit a97ce75 replaced te.apply_rotary_pos_emb with megatron.core.extensions.transformer_engine.fused_apply_rotary_pos_emb and accounted for 95%+ of per-layer systematic drift. Other contributors: 373cbb3 (SwiGLU fp32 silu*up), e8b6c2c (MoE fp32 weighted sum), d0223fe (te.GroupedLinear for expert MLPs), 076fb6d (input-based EOD mask). Post-fix: 7485-iter retrain final Δ=+0.0047 nat, block 0 dense layer is bitwise (L1=2.43e-7). See ALIGNMENT.md v10 FINAL."
 }
