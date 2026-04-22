@@ -138,15 +138,32 @@ Test A（`scripts/diag_weights_vs_forward.py --mode A`）方法：加载 ref ite
 2. **权重转换 converter 的细节** — 某个 tensor 的 layout/scale 有微差但 shape 对得上（converter 已覆盖 QKV/SwiGLU/144-experts shard，但可能还有没覆盖的 buffer 或 norm weight）
 3. **Loss 层面的某个 mask 处理** — ref 的 `loss_mask` 计算逻辑（EOD / reset_position / packed docs 边界）与 nano 的 `eod_mask_loss + mask_loss_id` 可能有差异
 
-### 已排除的候选
+### 已排除的候选（按排查顺序）
 
-- ❌ bf16 attention matmul 累加顺序（fp32 attn 同结果）
-- ❌ bf16 linear / MoE grouped_mm 累加（fp32 everywhere 同结果）
+- ❌ bf16 attention matmul 累加顺序（fp32 attn 同结果 +0.01386）
+- ❌ bf16 linear / MoE grouped_mm 累加（fp32 everywhere 同结果 +0.01370）
 - ❌ RMSNorm variance 精度（已 fp32）
 - ❌ RoPE 精度（已 fp32 compute）
 - ❌ MoE aux-free expert bias 未加载（已确认转换并加载 8 层×144）
-- ❌ train.bin 和 ref 的 sampler offset 不匹配（Test C 扫描 batch iter 5985-5992，观察到 iter 5989 onwards 稳定 +0.014 nat，iter<5989 稳定 negative Δ 呈现训练过程中的 loss decay 模式，符合 "iter-N ckpt = 训练过 N 次的 weights → 再 forward iter-(N+1) batch 是最新 fresh batch" 的预期）
+- ❌ train.bin 和 ref 的 sampler offset 不匹配（Test C 扫描 5985-5992 验证）
 - ❌ 初始化阶段（iter 0 bitwise 对齐 +0.0001 nat）
+- ❌ **T1**: 权重转换 key 覆盖（0 个 silently-dropped，8 个 missing 是训练-only buffer `local_tokens_per_expert`）
+- ❌ **T2**: seq_aux_balance loss（`self.training` 下才计算，eval 模式 aux=0，非源头）
+- ❌ **T3**: `reset_position_ids` / `reset_attention_mask` — ref yaml 两者都是 false（和 nano 的 continuous position_ids + causal mask 一致）
+- ❌ **T4**: MoERouter 的 aux-free bias 应用顺序 — 代码对比符合：`scores + bias` 只用于 topk selection，`final_weights` 用 unbiased `scores.gather(topk_idx)`（和 Megatron 一致）
+- ❌ **T5**: topk normalize 时机 — nano 在 topk 之后 normalize，匹配 ref 的 `moe_norm_topk_prob=True`
+- ❌ **T6**: Shared + routed 合并公式 — `out = shared + sum(g_i * E_i)`，无 `(1-Σg)` 重加权，匹配 deepseek 标准
+- ❌ RoPE 变体 — nano 用 halves-split（llama/megatron default），不是 interleaved（gpt-j style）
+- ❌ SwiGLU 分拆 — nano 取 `fc1[:H]` 为 gate、`fc1[H:]` 为 up，匹配 Megatron 的 `torch.chunk(y, 2, -1)`
+- ❌ Block 结构 — 标准 pre-LN（`x + attn(ln1(x))`, `x + mlp(ln2(x))`）
+- ❌ Ref 权重存储 dtype — bf16 保存，nano fp32 加载（padded），数学上同值
+
+### 仍可能的源头（下一轮验证，成本递增）
+
+1. **T7** — MoE routing token-level 对比：dump nano 每 token 选中的 experts，与 ref 端 grouped_mm 的输入 token 分布对比（需 Megatron 环境）
+2. **T9** — Loss mask.sum() 对齐：比较 nano 在某个 batch 的 unmasked token 数 vs Megatron log 的 `loss_mask.sum()`（需从 Megatron 训练日志抽取）
+3. **TE flash-attn-2 kernel** — 虽然 fp32 manual attn 排除了 bf16 源，但 TE flash-attn-2 可能还有非 obvious 的实现差异；装 TE 到 nano 做直接对比
+4. **dump intermediate activations** — 终极方案：让 ref 保存一次 iter-5989 forward 的 per-layer activations，与 nano 对照，看具体从哪一层开始发散
 
 ## 关键文件
 
