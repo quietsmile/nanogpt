@@ -1,0 +1,148 @@
+cybertron:
+  _target_: cybertron.config.config.CybertronArguments
+  accumulate_allreduce_grads_in_fp32: true
+  accurate_attn_mask_eod_token:
+  - 151643
+  accurate_attn_mask_with_cp: false
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1e-15
+  add_bias_linear: false
+  add_qkv_bias: false
+  apply_rope_fusion: true
+  async_save: false
+  attention_dropout: 0.0
+  attention_softmax_in_fp32: true
+  bf16: true
+  bias_dropout_fusion: true
+  bias_swiglu_fusion: true
+  bitwise_aligned: false
+  clip_grad: 1.0
+  communication_balance_loss_alpha: 0.0
+  context_parallel_size: 1
+  create_attention_mask_in_dataloader: false
+  data_cache_path: /prodcpfs/user/data/save/data/data_cache
+  data_path: null
+  dataloader_type: single
+  device_balance_loss_alpha: 0.0
+  disable_scaled_init_method: true
+  distributed_timeout_minutes: 45
+  enable_length_upsample: false
+  enable_monitor: true
+  ensure_full_document: false
+  eod_mask_loss: true
+  eval_interval: 20000
+  eval_iters: 10
+  exit_interval: 5990  # REDUMP: resume iter 5988, run 2 more iters → 5990, exit
+  exit_on_missing_checkpoint: false
+  expert_balance_loss_alpha: 0.0
+  expert_model_parallel_size: 4
+  ffn_hidden_size: 1536
+  final_norm: RMSNorm
+  finetune: false
+  global_batch_size: 64
+  gradient_accumulation_fusion: true
+  group_query_attention: true
+  hidden_dropout: 0.0
+  hidden_size: 512
+  init_method_std: 0.006
+  is_hf_ckpt: false
+  kv_channels: 64
+  length_upsample_data_root: ${save_dir}/length_upsample_data
+  length_upsample_times: '{\"0-32768\":1,\"32768-inf\":5}'
+  load: ${load_dir}
+  log_interval: 1
+  log_memory_to_tensorboard: true
+  log_throughput: true
+  log_timers_to_tensorboard: true
+  log_validation_ppl_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  lr: 0.0012
+  lr_decay_samples: 479040
+  lr_decay_style: wsd-exp
+  lr_warmup_init: 0.0
+  lr_warmup_samples: 32000
+  mask_loss_id: 160000
+  max_position_embeddings: 8192
+  micro_batch_size: 4
+  min_lr: 0.00011999999999999999
+  moe_enable_deepep: false
+  moe_ffn_hidden_size: 160
+  moe_gating_fp32: true
+  moe_grouped_gemm: true
+  moe_layer_freq: "[0]*1+[1]*8"
+  moe_per_layer_logging: true
+  moe_per_layer_logging_interval: 100
+  moe_permute_fusion: true
+  moe_router_load_balancing_type: greedy
+  moe_router_topk: 8
+  moe_shared_expert_intermediate_size: 160
+  moe_shared_expert_overlap: false
+  moe_token_dispatcher_type: allgather
+  monitor_interval: 100
+  multi_latent_attention: false
+  n_group: 8
+  no_load_optim: false
+  no_load_rng: false
+  no_save_optim: null
+  no_save_rng: null
+  norm_epsilon: 1.0e-05
+  norm_topk_prob: true
+  normalization: RMSNorm
+  num_attention_heads: 4
+  num_experts: 144
+  num_layers: 9
+  num_layers_per_virtual_pipeline_stage: null
+  num_query_groups: 2
+  num_workers: 8
+  optimizer: adam
+  overlap_grad_reduce: true
+  overlap_p2p_comm: true
+  override_opt_param_scheduler: true
+  padded_vocab_size: 152064
+  pipeline_model_parallel_size: 1
+  position_embedding_type: rope
+  qk_layernorm: true
+  # recompute_granularity: null
+  # recompute_method: uniform
+  # recompute_num_layers: 1
+  reset_attention_mask: false
+  reset_position_ids: false
+  rotary_base: 50000
+  routed_scaling_factor: 1.0
+  router_expert_score_correction_coeff: 0.001
+  router_scoring_func: sigmoid
+  save: ${save_dir}/${exp_name}
+  save_interval: 1497
+  seq_aux: true
+  seq_length: 8192
+  sequence_parallel: true
+  sequence_wise_balance_loss_alpha: 0.0001
+  spike_file_path: null
+  split: null
+  swiglu: true
+  tensor_model_parallel_size: 1
+  tensorboard_dir: ${save_dir}/tensorboard/${exp_name}
+  timing_log_level: 0
+  tokenizer_model: /prodcpfs/user/xiaoming/models/dots_tokenizer
+  tokenizer_type: HFTokenizer
+  topk_group: 1
+  train_samples: 1572864000
+  transformer_impl: transformer_engine
+  untie_embeddings_and_output_weights: true
+  use_checkpoint_args: false
+  use_checkpoint_opt_param_scheduler: false
+  use_dist_ckpt: false
+  use_distributed_optimizer: true
+  use_gpt_dataset_ext: false
+  use_router_expert_score_correction: true
+  weight_decay: 0.1
+  wsd_constant_samples: 383232
+defaults:
+- hydra
+- _self_
+- data_pretrain_v3_pai.yaml
+exp_name: ???
+load_dir: ???
+save_dir: ???
+
