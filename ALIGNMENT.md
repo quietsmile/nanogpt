@@ -158,12 +158,42 @@ Test A（`scripts/diag_weights_vs_forward.py --mode A`）方法：加载 ref ite
 - ❌ Block 结构 — 标准 pre-LN（`x + attn(ln1(x))`, `x + mlp(ln2(x))`）
 - ❌ Ref 权重存储 dtype — bf16 保存，nano fp32 加载（padded），数学上同值
 
-### 仍可能的源头（下一轮验证，成本递增）
+### 逐层 activation stats 对比（`scripts/diag_activations.py`）
 
-1. **T7** — MoE routing token-level 对比：dump nano 每 token 选中的 experts，与 ref 端 grouped_mm 的输入 token 分布对比（需 Megatron 环境）
-2. **T9** — Loss mask.sum() 对齐：比较 nano 在某个 batch 的 unmasked token 数 vs Megatron log 的 `loss_mask.sum()`（需从 Megatron 训练日志抽取）
-3. **TE flash-attn-2 kernel** — 虽然 fp32 manual attn 排除了 bf16 源，但 TE flash-attn-2 可能还有非 obvious 的实现差异；装 TE 到 nano 做直接对比
-4. **dump intermediate activations** — 终极方案：让 ref 保存一次 iter-5989 forward 的 per-layer activations，与 nano 对照，看具体从哪一层开始发散
+**关键发现**：ref 的 training log 本身就记录了 **per-iter × per-sublayer activation stats**，可以直接 hook nano forward 再对照。
+
+iter 5989 的对比结果（ref iter-5988 ckpt → 5989 batch）：
+
+| hook 点 | nano (avg over 9 layers × 64 samples) | ref (logged) | Δ |
+|---|---|---|---|
+| `act_std/decoder_input`（embed 输出） | 0.0623 | 0.0624 | −0.15% ✓ |
+| `act_std/attn_output`（self-attn 输出） | 0.6734 | 0.6750 | −0.24% ✓ |
+| `act_std/attn_plus_residual` | 2.2247 | 2.2250 | −0.01% ✓ |
+| `act_std/ffn_output` | 0.9752 | 0.9734 | +0.19% ✓ |
+| `act_std/ffn_plus_residual` | 2.6758 | 2.6712 | +0.17% ✓ |
+| `loss` | 3.0724 | 3.0575 | +0.014936 |
+
+**所有逐层 std 都在 0.2% 以内对齐**。说明每一层 sublayer 的 forward 数学都是正确的。
+
+**attn-specific 指标：**
+| 指标 | nano | ref |
+|---|---|---|
+| `max_attn_logits/full` | 28.85 | 14.01 |
+| `first_token_attn_score/full` | 3.62e-3 | 1.52e-4 |
+| `attn_entropy_mean/full` | 4.102 | 4.231 |
+
+这三个 attention 指标有 2× / 24× 的系统性差异。但：
+- `act_std/attn_output` 完全对齐
+- SDPA fp32 manual attn 同 bf16 结果
+- 整体 entropy 只差 3%（4.10 vs 4.23，nano 稍 peaked）
+
+推测解读：**ref 的这三个指标在测量口径上可能和 nano 不同**（例如 ref 可能在 pre-scale、或 excluding causal-masked 位置测 max；first_token_attn_score 的 head/position 聚合方式不确定）。无法直接作为 "bug 存在" 的证据，因为 attn_output 完全对齐。
+
+### 剩余未验证（成本递增）
+
+1. **让 ref 一次 forward 也 dump intermediate activations**（终极 ground-truth 对比，需要 ref Megatron env）
+2. **TE flash-attn-2 kernel 装到 nano**（直接 kernel 级对比）
+3. **对 lm_head 输出 logits 也做直接对比**（ref 不 log logits，需要 ref 端额外 dump）
 
 ## 关键文件
 
