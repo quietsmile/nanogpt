@@ -131,10 +131,15 @@ def forward_with_hooks(model, idx, tgt):
         return self.c_proj(y)
 
     def patched_moe_fwd(self, x):
-        out, aux = orig_moe_fwd(self, x)
-        # capture routing: access router's last accumulated counts.
-        with torch.no_grad():
-            tpe = self.router.local_tokens_per_expert.detach().clone()
+        # Force router to accumulate token_per_expert by enabling grad context;
+        # we still use no_grad outer wrapper so nothing trains.
+        # The router's counter path is gated on torch.is_grad_enabled(), so
+        # we temporarily re-enable here.
+        with torch.enable_grad():
+            # reset before this layer's count
+            self.router.local_tokens_per_expert.zero_()
+            out, aux = orig_moe_fwd(self, x)
+        tpe = self.router.local_tokens_per_expert.detach().clone()
         per_layer_tokens_per_expert.append(tpe)
         return out, aux
 

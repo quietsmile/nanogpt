@@ -195,6 +195,32 @@ iter 5989 的对比结果（ref iter-5988 ckpt → 5989 batch）：
 2. **TE flash-attn-2 kernel 装到 nano**（直接 kernel 级对比）
 3. **对 lm_head 输出 logits 也做直接对比**（ref 不 log logits，需要 ref 端额外 dump）
 
+### MoE routing 层面的细粒度对比
+
+读了 cybertron-dots3 的 `modules_deepseekv2.py` 的 router forward 和 token_dispatcher。Nano 的实现和 cybertron 的数学等价：
+- `scores = sigmoid(F.linear(x.float(), w.float()))` — 都是 fp32 gating
+- `scores_for_choice = scores + e_score_correction_bias` — bias 只用于 topk 选择
+- `final_weights = scores.gather(topk_idx) / scores.gather(topk_idx).sum()` — 用 unbiased scores 做 gate
+
+实测对比 iter 5989 batch（64 samples）全局 tokens_per_expert aggregate（每层 sum 后除以 64 得 per-microbatch avg）：
+
+| layer | nano per-mb max | nano per-mb min |
+|---|---|---|
+| 1 | 545 | 340 |
+| 2 | 552 | 305 |
+| 8 | 656 | 220 |
+
+Ref 在 iter 5989 logged `tokens_per_expert/max: 1275, min: 62` — ref 的 per-mb max 比 nano 高 2×，min 更小。说明 **ref 的 per-sample routing 实际上比 nano 更不均衡**，可能是因为 ref 的 aux-free bias 达到的平衡点在 per-sample 层面 token 分布更 peaky（某些 expert 特别 popular，某些几乎不用），但全局上仍然 balanced（mean=455）。
+
+这是一个 **per-sample 层面 token dispatch 的数值 pattern 差异**。Nano 的 router 数学正确但产生了不同的 per-sample 分布，原因可能：
+- bf16 autocast 下 nano 的 score+bias 精度路径和 ref 的 bf16/fp32 mix 路径不同
+- 导致 topk 在边界 token 上做不同的选择
+- 路由不同 → 不同 expert 处理 token → 最终 logits 不同 → loss 不同
+
+**这个 per-sample routing 差异就是残留 +0.014 nat 最可能的源头**。要彻底对齐需要：
+- 精确匹配 cybertron 的 bf16/fp32 dtype 路径
+- 或替换成 Megatron 同一套 token_dispatcher
+
 ## 关键文件
 
 - `train.py` — 训练主循环（DDP + MoE aux-free bias update hook）
