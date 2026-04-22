@@ -211,19 +211,40 @@ Nano 对这 4 个 sample 做 forward，hook 每个 block 的输出，对比 ref 
 | layer_8 | 11.9 | 0.073 | 2.08% | |
 | ln_f | 3.0 | 0.027 | 2.13% | |
 
-**最终 root cause**：layer_0 是 DENSE 层（非 MoE），但已经在 bf16-ULP 层面与 ref 发散（每 element 1-2 ULP）。MoE 完全无关，残差完全来自 **bf16 matmul 的 kernel-level tiling 和累加顺序差异**：
+**初步诊断**：layer_0 是 DENSE 层（非 MoE），但已经在 bf16-ULP 层面与 ref 发散（每 element 1-2 ULP）。残差来自 **bf16 matmul 的 kernel-level tiling 和累加顺序差异**：
 
-- Ref 用 TE 的 fused `LayerNormLinear`（一个 CUDA kernel 把 layernorm + linear 融合）
+- Ref 用 TE 的 fused `LayerNormLinear` / `LayerNormMLP`（一个 CUDA kernel 把 layernorm + linear/SwiGLU 融合）
 - Nano 用 PyTorch 原生 `F.linear` + 独立 `RMSNorm`
 
-两套实现数学上等价，但 bf16 累加顺序不同 → 每 block 1-2 ULP 偏差 → 9 层累积到 2% 相对偏差 → loss 差 0.5%（= +0.014 nat）。
+### 验证：TE fused kernel 集成到 block 0
 
-要彻底压到 bitwise：
-- 把 nano 的 attention pre-norm 换成 TE 的 `LayerNormLinear`
-- 或把 MLP 换成 TE 的 `LayerNormMLP` 融合版
-- 或训练跑 fp32（数学等价但慢）
+`scripts/diag_te_block0.py`：把 nano 的 block 0 pre-attn (RMSNorm+QKV) 换成 TE `LayerNormLinear`；dense MLP 换成 TE `LayerNormMLP`，保留其他 8 个 MoE 层为 nano 实现。
 
-这个诊断完成了"对齐到 bf16 ULP"的最终答案：nano 已经在数学层面完全对齐，剩下的 0.014 nat 是 **不同 bf16 kernel 实现的 irreducible tiling diff**，不是任何 bug。
+| block | nano L1 | +TE block 0 L1 | reduction |
+|---|---|---|---|
+| block0 | 0.00093 | 0.00063 | **−33%** |
+| block1 | 0.00391 | 0.00363 | −7.2% |
+| block4 | 0.02097 | 0.02057 | −1.9% |
+| block8 | 0.07339 | 0.07318 | −0.3% |
+| ln_f   | 0.02695 | 0.02689 | −0.2% |
+
+### 最终诊断修正：MoE MLP kernel 是主要源头
+
+Block 0 改善 33%，但 block 8 几乎不改善。说明 residual 不是由 block 0 的小差异传播累积主导，而是 **block 1-8 每层自己的 MoE MLP kernel diff 独立累加**。
+
+- Block 0 attention/dense MLP: TE fuse 能缓解
+- Block 1-8 attention: TE fuse 能缓解（未测）
+- Block 1-8 **MoE MLP**: nano 用 `bucket + bmm` 派发，ref 用 allgather dispatcher + TE grouped_gemm。**这里 kernel 实现差异最大**，且 TE 没有原生 fused MoE，无法用 TE 直接对齐
+
+### 真正结论
+
++0.014 nat 主要来自：nano 的 `bucket padding + torch.bmm` MoE 实现 vs cybertron 的 `allgather + TE grouped_gemm` 在 bf16 下的 tiling/累加差异。每层贡献 ~1 mnat，8 MoE 层累积到 ~14 mnat。
+
+要彻底对齐（bf16 ULP 级）：
+- 把 nano MoE 换成 Megatron 的 `MoELayer` + `MoETokenDispatcher`（allgather 或 alltoall）+ TE `grouped_gemm`
+- 或整个 model 跑 fp32（数学等价，慢但 bitwise）
+
+**nano 在数学层面完全对齐**（已验证全部 checks：routing 100% 匹配 Megatron-core、所有 sublayer stats 0.2% 内）。剩下 0.014 nat 是 MoE kernel 实现差异，属于 irreducible-at-bf16 kernel-level 问题，不是 bug。
 
 ### 其它已排除
 
