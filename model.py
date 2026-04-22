@@ -745,7 +745,10 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            logits = self.lm_head(x)
+            # Force lm_head in fp32. Ref `fp16_lm_cross_entropy: false` implies logits
+            # should not be bf16 (bf16 has ~3 decimal digits precision on 152064-dim softmax).
+            with torch.amp.autocast('cuda', enabled=False):
+                logits = F.linear(x.float(), self.lm_head.weight.float())
             t_flat = targets.view(-1)
             # Mask positions where target is EOD or mask_loss_id (eod_mask_loss, mask_loss_id)
             mask_ids = []
