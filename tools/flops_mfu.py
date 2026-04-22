@@ -89,9 +89,16 @@ def count_params_detailed(model) -> ParamBreakdown:
     total_shared = 0
     for i, layer in enumerate(model.transformer.h):
         mlp = layer.mlp
-        if hasattr(mlp, 'experts'):       # MoE
-            r = sum(p.numel() for e in mlp.experts for p in e.parameters())
-            s = sum(p.numel() for p in mlp.shared_expert.parameters()) if mlp.shared_expert is not None else 0
+        # nanogpt MoEFFN stores stacked expert weights as gate_weight/up_weight/
+        # down_weight (each [E, ...]) rather than a ModuleList of ExpertMLPs.
+        # A shared_expert attribute (possibly None) is also present on MoE layers
+        # only. Detect MoE by the stacked-weight layout.
+        is_moe = hasattr(mlp, 'gate_weight') and hasattr(mlp, 'down_weight') \
+                 and hasattr(mlp, 'shared_expert')
+        if is_moe:
+            r = mlp.gate_weight.numel() + mlp.up_weight.numel() + mlp.down_weight.numel()
+            s = (sum(p.numel() for p in mlp.shared_expert.parameters())
+                 if mlp.shared_expert is not None else 0)
             rr = 0  # router
             if hasattr(mlp, 'router'):
                 rr = sum(p.numel() for p in mlp.router.parameters() if p.requires_grad)
