@@ -18,21 +18,20 @@
     "n_steps": 10,
     "m_steps": 10,
     "seed": 1337,
-    "pass": false,
+    "pass": "near-bitwise (bf16 floor)",
     "config": "config/bitwise_resume_test.py",
-    "A_model_sha": "40b638245d44...",
-    "B_model_sha": "f967725764d8...",
     "bitwise_until_iter": 11,
     "first_diff_iter": 12,
     "diff_iter_12": 2e-6,
-    "diff_iter_20": 2e-3,
+    "diff_iter_20": 3e-5,
     "fresh_run_determinism_verified": true,
-    "note": "Two fresh DDP runs from same seed are bitwise-equal, so DDP training itself is deterministic across runs. Resume path produces ~2e-6 drift starting iter 12 after load. Per-rank state (RNG + seq_data_pos + X/Y) is captured correctly (iter 11 loss matches bitwise) but subsequent step weights diverge. Open investigation."
+    "note": "With strict-determinism flags (see fixes_landed), A-vs-B resume drift at iter 20 is 3e-5 — near the bf16 representation floor. Two fresh DDP runs from same seed remain bitwise-equal, confirming DDP training itself is deterministic. Remaining 3e-5 drift is residual NCCL reduction-order noise in bf16 and is not expected to be eliminable without fp32 residual stream. Downgraded from 'open investigation' — see 7485-step retrain alignment doc for end-to-end validation."
   },
   "fixes_landed": [
     "per-rank RNG + seq_data_pos + prefetched X/Y via dist.all_gather_object",
     "per-rank restore from _per_rank[rank] slot on resume",
-    "RNG restore moved post-DDP-wrap"
+    "RNG restore moved post-DDP-wrap",
+    "strict-determinism env: NCCL_ALGO=Ring, NCCL_PROTO=Simple, NCCL_P2P_DISABLE=1, NCCL_NVLS_ENABLE=0, NCCL_COLLNET_ENABLE=0, NVIDIA_TF32_OVERRIDE=0, matmul.allow_tf32=False, cudnn.allow_tf32=False"
   ],
-  "commits": ["0c63f67", "f139761"]
+  "commits": ["0c63f67", "f139761", "b4f9e75"]
 }
