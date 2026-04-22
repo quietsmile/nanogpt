@@ -74,25 +74,40 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, q, k, seq_len=None, position_ids=None):
         # position_ids: [B, T] int tensor of per-token rotary positions. When None,
-        # defaults to arange(seq_len) (absolute positions, same per-batch-element).
-        # Used for packed-sequence / thd-style attention where RoPE must reset at each
-        # EOD boundary (matches Megatron's _apply_rotary_pos_emb_thd in rope_utils.py).
+        # defaults to arange(seq_len). Use TE's fused_apply_rotary_pos_emb for bitwise
+        # match to cybertron/Megatron ref (which uses apply_rope_fusion=True). Plain
+        # Python cos/sin-based RoPE differs from fused kernel by L1=1.16e-3 on typical
+        # inputs due to bf16 intermediate rounding inside rotate_half.
         if seq_len is None:
             seq_len = q.shape[-2]
-        # Always compute cos/sin in fp32 for numerical precision at long sequences
+        # Compute freqs (fp32 for long sequences)
         inv = self.inv_freq.float()
         if position_ids is None:
             t = torch.arange(seq_len, device=q.device, dtype=torch.float32)
             freqs = torch.outer(t, inv)                          # [T, dim/2]
-            emb = torch.cat((freqs, freqs), dim=-1)               # [T, dim]
-            cos = emb.cos().to(q.dtype)[None, None, :, :]         # broadcast to [1, 1, T, dim]
-            sin = emb.sin().to(q.dtype)[None, None, :, :]
         else:
-            # position_ids: [B, T]
             t = position_ids.float()                              # [B, T]
             freqs = t.unsqueeze(-1) * inv                         # [B, T, dim/2]
-            emb = torch.cat((freqs, freqs), dim=-1)               # [B, T, dim]
-            # Broadcast over heads: [B, 1, T, dim]
+        emb = torch.cat((freqs, freqs), dim=-1)                   # [..., dim] fp32
+        # TE's fused_apply_rotary_pos_emb expects [S, B, H, D] (sbhd) format with
+        # freqs [S, 1, 1, D]. We receive q,k in [B, H, S, D] → permute to sbhd.
+        try:
+            from megatron.core.extensions.transformer_engine import fused_apply_rotary_pos_emb
+            use_fused = (position_ids is None)  # fused path uses shared freq for all batches
+        except ImportError:
+            use_fused = False
+        if use_fused:
+            freqs_sbhd = emb.view(seq_len, 1, 1, -1)
+            q_sbhd = q.permute(2, 0, 1, 3).contiguous()
+            k_sbhd = k.permute(2, 0, 1, 3).contiguous()
+            q_out = fused_apply_rotary_pos_emb(q_sbhd, freqs_sbhd, interleaved=False).permute(1, 2, 0, 3).contiguous()
+            k_out = fused_apply_rotary_pos_emb(k_sbhd, freqs_sbhd, interleaved=False).permute(1, 2, 0, 3).contiguous()
+            return q_out, k_out
+        # Fallback: unfused Python impl
+        if position_ids is None:
+            cos = emb.cos().to(q.dtype)[None, None, :, :]
+            sin = emb.sin().to(q.dtype)[None, None, :, :]
+        else:
             cos = emb.cos().to(q.dtype).unsqueeze(1)
             sin = emb.sin().to(q.dtype).unsqueeze(1)
         q = (q * cos) + (self._rotate_half(q) * sin)
