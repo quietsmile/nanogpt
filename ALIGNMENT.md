@@ -195,11 +195,15 @@ Hook 解读对齐（通过权重 rms 比对验证）：
 
 推测解读：**ref 的这三个指标在测量口径上可能和 nano 不同**（例如 ref 可能在 pre-scale、或 excluding causal-masked 位置测 max；first_token_attn_score 的 head/position 聚合方式不确定）。无法直接作为 "bug 存在" 的证据，因为 attn_output 完全对齐。
 
-### 剩余未验证（成本递增）
+### 剩余未验证（只剩一条路）
 
-1. **让 ref 一次 forward 也 dump intermediate activations**（终极 ground-truth 对比，需要 ref Megatron env）
-2. **TE flash-attn-2 kernel 装到 nano**（直接 kernel 级对比）
-3. **对 lm_head 输出 logits 也做直接对比**（ref 不 log logits，需要 ref 端额外 dump）
+1. **让 cybertron Megatron forward 跑一次 bitwise dump，nano 同 input 逐层对**。Cybertron 自带 `examples/pretrain/lm/bitwise_dump.py` + `tests/pretrain_llm/integrate_tests/moe_bitwise_check` 的完整 CI 套件，但依赖完整的 Megatron 训练 env（dist ckpt loader、HF tokenizer、blended dataset、TP/PP/EP sharding、hydra config）。要若干天的配置工作
+
+### 其它已排除
+
+- ✅ **TE DotProductAttention (flash-attn-2 kernel)**: 与 SDPA **bitwise 相同结果**，kernel 级确定排除
+- ✅ 数据：token 分布正常，无 >vocab_size token，0 个 `mask_loss_id=160000` 实际存在（此 mask 从未触发）
+- ✅ EOD mask 统计一致（0.13% tokens 是 EOD）
 
 ### MoE routing 层面的细粒度对比
 
