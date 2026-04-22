@@ -31,6 +31,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+from monitor import create_monitor
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -506,6 +507,8 @@ t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
 running_mfu = -1.0
+monitor = create_monitor(raw_model, optimizer, out_dir=out_dir,
+                         master=master_process, ddp=ddp)
 
 while True:
     # Set LR for this iteration
@@ -610,14 +613,11 @@ while True:
         _grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     else:
         _grad_norm = torch.tensor(0.0)
-    scaler.step(optimizer)
-    scaler.update()
-    optimizer.zero_grad(set_to_none=True)
 
-    t1 = time.time()
-    dt = t1 - t0
-    t0 = t1
-    # All-reduce mean across DP ranks so reported loss matches ref's global-batch mean
+    # All-reduce loss BEFORE optimizer.step so monitor.step() (which consumes
+    # grads + global_mean_loss) runs while grads are still present. Moving the
+    # collective up by two lines changes no training state — it just brings the
+    # logging value forward a hair. The collective itself is unchanged.
     _local_mean = _acc_loss_sum / gradient_accumulation_steps
     if ddp:
         _t = torch.tensor(_local_mean, device=device)
@@ -625,6 +625,16 @@ while True:
         _global_mean_loss = _t.item()
     else:
         _global_mean_loss = _local_mean
+
+    scaler.step(optimizer)
+    scaler.update()
+    monitor.step(iter_num, loss=_global_mean_loss, grad_norm=_grad_norm, lr=lr,
+                 samples=(iter_num + 1) * _eff_gbs)
+    optimizer.zero_grad(set_to_none=True)
+
+    t1 = time.time()
+    dt = t1 - t0
+    t0 = t1
 
     if iter_num % log_interval == 0 and master_process:
         lossf = _global_mean_loss
@@ -655,5 +665,6 @@ while True:
     if iter_num > max_iters:
         break
 
+monitor.close()
 if ddp:
     destroy_process_group()
