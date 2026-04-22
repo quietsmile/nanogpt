@@ -39,6 +39,33 @@ optimizer = model.configure_optimizers(
     weight_decay=0.1, learning_rate=lr_5989,
     betas=(0.9, 0.95), eps=1e-15, device_type='cuda')
 
+# Load ref's iter_5988 Adam state (exp_avg, exp_avg_sq from 5988 iterations)
+print("Loading ref iter_5988 Adam state into nano optimizer...")
+nano_optim_payload = torch.load('/newcpfs/user/yuchen/karpathy/cybertron_dump/nano_optim_iter5988.pt',
+                                 map_location='cuda', weights_only=False)
+ref_state = nano_optim_payload['state']  # {nano_param_name: {exp_avg, exp_avg_sq, step}}
+n_loaded = 0
+n_missing = 0
+for group in optimizer.param_groups:
+    for p in group['params']:
+        # Find corresponding name
+        pname = None
+        for name, param in model.named_parameters():
+            if param is p:
+                pname = name; break
+        if pname in ref_state:
+            st = ref_state[pname]
+            optimizer.state[p] = {
+                'step': torch.tensor(float(st['step']), dtype=torch.float32, device='cuda'),
+                'exp_avg': st['exp_avg'].to('cuda'),
+                'exp_avg_sq': st['exp_avg_sq'].to('cuda'),
+            }
+            n_loaded += 1
+        else:
+            n_missing += 1
+            if n_missing <= 3: print(f"  missing optim state for: {pname}")
+print(f"Loaded optim state for {n_loaded} params, missing {n_missing}")
+
 data = np.memmap('/root/nanogpt/data/cybertron_baseline/train.bin', dtype=np.int32, mode='r')
 block = 8192
 GBS = 64
@@ -60,6 +87,8 @@ batch_5989 = gather_batch(5988 * 64)
 # Simulate ref-style: MBS=4 samples per microbatch, NUM_MB=16 microbatches
 total_loss = 0.0
 optimizer.zero_grad(set_to_none=True)
+REF_NUM_MB = 2  # ref's num_microbatches per DP rank
+FIX_SCALE = 1.0  # Adam is scale-invariant; /2 doesn't matter, keep native
 for mb_idx in range(NUM_MB):
     # Gather 4 samples for this microbatch
     x_list = [batch_5989[mb_idx*MBS + b][0] for b in range(MBS)]
@@ -68,8 +97,8 @@ for mb_idx in range(NUM_MB):
     Y = torch.from_numpy(np.stack(y_list)).cuda()
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
         _, mb_loss = model(X, targets=Y)
-    # Megatron: loss passed to backward = mb_loss / num_microbatches
-    (mb_loss / NUM_MB).backward()
+    # FIX: apply extra /2 (the /num_mb factor ref has)
+    (mb_loss / NUM_MB / FIX_SCALE).backward()
     total_loss += mb_loss.item()
     del X, Y
     torch.cuda.empty_cache()
@@ -111,6 +140,25 @@ print(f"\nPer-block (transformer.h.N):")
 for i in range(len(model.transformer.h)):
     bp = list(model.transformer.h[i].parameters())
     print(f"  block {i}: {gn(bp):.6f}")
+
+# Per-sub-component grad norm for first 2 blocks (attention vs MLP)
+print(f"\nPer-sub-component for block 0, 1:")
+for i in [0, 1]:
+    blk = model.transformer.h[i]
+    attn_params = list(blk.attn.parameters())
+    mlp_params = list(blk.mlp.parameters())
+    ln_params = list(blk.ln_1.parameters()) + list(blk.ln_2.parameters())
+    print(f"  block {i}: attn={gn(attn_params):.4f}, mlp={gn(mlp_params):.4f}, ln={gn(ln_params):.4f}")
+
+# Top-10 individual param grad norms
+print(f"\nTop 15 individual param grad norms:")
+named_gns = []
+for n, p in model.named_parameters():
+    if p.grad is not None:
+        named_gns.append((n, p.grad.float().norm().item(), p.numel()))
+named_gns.sort(key=lambda x: -x[1])
+for n, gnv, numel in named_gns[:15]:
+    print(f"  {n:60s} grad_norm={gnv:.4f} numel={numel:,}")
 
 # Try excluding MoE expert weights (gate/up/down) — Megatron may put these in separate optimizer
 moe_expert_params = []
