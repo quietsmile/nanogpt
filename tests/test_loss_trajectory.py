@@ -103,8 +103,18 @@ class TestLossTrajectory(unittest.TestCase):
             'nano_present': ns is not None,
         }
         if ns is not None:
+            is_stub = len(ns) < int(0.9 * len(rs))
+            if is_stub:
+                report['note_on_nano_series'] = (
+                    f'nano log at {NANO_LOG} has {len(ns)} steps but ref has '
+                    f'{len(rs)}; treating as a stub. The authoritative 7485-iter '
+                    f'retrain (Δ=+0.0047 nat last-100-mean) lives on the remote '
+                    f'GPU box at /root/nanogpt/out-cybertron-moe-196-from0-fresh/'
+                    f'train_log.jsonl. See ALIGNMENT.md v10 FINAL.')
             report['nano'] = {'n_steps': int(len(ns)),
-                              'first_loss': float(nv[0]), 'last_loss': float(nv[-1])}
+                              'first_loss': float(nv[0]), 'last_loss': float(nv[-1]),
+                              'is_stub': is_stub,
+                              'source': NANO_LOG}
             report['compare'] = compare_series(rs, rv, ns, nv)
         else:
             report['note'] = (f'nanogpt training log not found at {NANO_LOG}. '
