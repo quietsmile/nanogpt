@@ -69,15 +69,23 @@ config if you change cluster size.
 ## 6. Bitwise resume validation (8-GPU box)
 
 ```bash
-export NCCL_ALGO=Ring   # deterministic all-reduce order across runs
-make bitwise-check
+# Single-GPU (PASSES — bitwise model + optimizer match):
+cd /root/nanogpt
+CUDA_VISIBLE_DEVICES=0 python3 scripts/run_bitwise_resume_test.py --n 10 --m 10
+
+# DDP 4-rank (known limitation — matches iter 11 bitwise, diverges ~2e-6 at iter 12):
+python3 scripts/run_bitwise_resume_ddp.py --n 10 --m 10 --nranks 4
 ```
 
-**Scaffold state (2026-04-20)**: `scripts/bitwise_resume_runner.py` writes the
-schema placeholder but the full A/B comparison needs `train.py` to grow explicit
-"run N steps, save, exit" and "resume from ckpt, run M steps" single-shot flags.
-Currently `train.py` chains everything under `max_iters` + `save_interval` —
-workable but less ergonomic. TODO when we wire it in.
+**Status (2026-04-22)**:
+- Single-GPU: PASSED. A-path (10 → save → resume → 10 more) produces bitwise-
+  identical model state_dict + optimizer sha256 vs B-path (20 straight).
+- DDP: Step 11 (first post-resume) matches bitwise. Iter 12+ diverges by ~2e-6
+  growing to ~2e-3. Two fresh DDP runs from same seed DO match bitwise, so the
+  resume path has unidentified hidden state issue. See `reports/bitwise_resume.json`.
+
+The test uses `config/bitwise_resume_test.py` (tiny 3-layer MoE, bs=1024) so
+each path finishes in <1min.
 
 ## 7. Loss trajectory comparison
 
