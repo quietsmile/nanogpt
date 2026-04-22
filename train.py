@@ -319,16 +319,36 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict, strict=False)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
-    # Restore pre-eval RNG + data state for bitwise-deterministic resume
-    if 'rng_state_cpu' in checkpoint:
-        torch.set_rng_state(checkpoint['rng_state_cpu'].cpu())
-    if 'rng_state_cuda' in checkpoint:
-        torch.cuda.set_rng_state_all([s.cpu() for s in checkpoint['rng_state_cuda']])
-    if 'seq_data_pos' in checkpoint:
-        _seq_data_pos.update(checkpoint['seq_data_pos'])
-    # Restore the batch that was current when checkpoint was saved
-    _resume_batch = (checkpoint['X'].to(device), checkpoint['Y'].to(device)) \
-        if 'X' in checkpoint else None
+    # Restore pre-eval RNG + data state for bitwise-deterministic resume.
+    # For DDP runs, ckpt may hold per-rank state under '_per_rank'; each rank
+    # picks its own slot. Otherwise fall back to the single-rank state.
+    # Stash RNG + data position state; apply AFTER DDP wrap so both scratch
+    # and resume paths have identical pre-loop RNG (DDP __init__ may consume RNG).
+    _pr = checkpoint.get('_per_rank')
+    _per_rank_batch = None
+    _pending_rng_cpu = None
+    _pending_rng_cuda = None
+    if _pr is not None and ddp_rank < len(_pr):
+        _mine = _pr[ddp_rank]
+        _pending_rng_cpu = _mine['rng_state_cpu'].cpu()
+        _pending_rng_cuda = [s.cpu() for s in _mine['rng_state_cuda']]
+        _seq_data_pos.update(_mine['seq_data_pos'])
+        if 'X' in _mine:
+            _per_rank_batch = (_mine['X'].to(device), _mine['Y'].to(device))
+    else:
+        if 'rng_state_cpu' in checkpoint:
+            _pending_rng_cpu = checkpoint['rng_state_cpu'].cpu()
+        if 'rng_state_cuda' in checkpoint:
+            _pending_rng_cuda = [s.cpu() for s in checkpoint['rng_state_cuda']]
+        if 'seq_data_pos' in checkpoint:
+            _seq_data_pos.update(checkpoint['seq_data_pos'])
+    # Restore the batch that was current when checkpoint was saved.
+    # DDP: prefer per-rank X/Y from _per_rank slot; otherwise fall back to master's X/Y.
+    if _per_rank_batch is not None:
+        _resume_batch = _per_rank_batch
+    else:
+        _resume_batch = (checkpoint['X'].to(device), checkpoint['Y'].to(device)) \
+            if 'X' in checkpoint else None
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     override_args = dict(dropout=dropout)
@@ -467,6 +487,14 @@ if wandb_log and master_process:
 # -----------------------------------------------------------------------------
 # Training loop
 # -----------------------------------------------------------------------------
+# On resume: restore RNG state AFTER DDP wrap (DDP __init__ may consume RNG in
+# scratch path, so restoring before wrap leaves resume with stale state). Doing
+# it here puts both paths on equal footing right before the training loop.
+if init_from == 'resume':
+    if _pending_rng_cpu is not None:
+        torch.set_rng_state(_pending_rng_cpu)
+    if _pending_rng_cuda is not None:
+        torch.cuda.set_rng_state_all(_pending_rng_cuda)
 # On resume, use the saved batch so training step iter_num uses identical data
 if init_from == 'resume' and _resume_batch is not None:
     X, Y = _resume_batch
@@ -490,6 +518,22 @@ while True:
         pre_eval_seq_pos = dict(_seq_data_pos)
         pre_eval_rng_cpu = torch.get_rng_state()
         pre_eval_rng_cuda = torch.cuda.get_rng_state_all()
+        # DDP: each rank has its own _seq_data_pos + CUDA RNG state. Collect them
+        # all on rank 0 so the single ckpt can restore each rank's slot.
+        pre_eval_per_rank = None
+        if ddp:
+            _local_snap = {
+                'rng_state_cpu': pre_eval_rng_cpu,
+                'rng_state_cuda': pre_eval_rng_cuda,
+                'seq_data_pos': pre_eval_seq_pos,
+                'X': X.detach().cpu(),
+                'Y': Y.detach().cpu(),
+            }
+            _gather = [None] * ddp_world_size
+            import torch.distributed as _dist
+            _dist.all_gather_object(_gather, _local_snap)
+            if master_process:
+                pre_eval_per_rank = _gather
         if master_process:
             pre_eval_X = X.clone()
             pre_eval_Y = Y.clone()
@@ -530,6 +574,7 @@ while True:
                         'rng_state_cpu': pre_eval_rng_cpu,
                         'rng_state_cuda': pre_eval_rng_cuda,
                         'seq_data_pos': pre_eval_seq_pos,
+                        '_per_rank': pre_eval_per_rank,
                         'X': pre_eval_X.cpu(),
                         'Y': pre_eval_Y.cpu(),
                     }
