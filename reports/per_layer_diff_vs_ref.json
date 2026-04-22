@@ -18,10 +18,19 @@
     {"block": "ln_f",       "L_inf": 3.0,    "L1": 0.02695,  "rel_mean": 0.02128}
   ],
   "diagnosis": "Block 0 (DENSE layer, not MoE) already diverges from ref at bf16-ULP level (L_inf=0.125 on activations of magnitude up to 16). Diff accumulates monotonically through 9 blocks to rel_mean=2.1%. Final loss diff is 0.5% (0.014 nat on 3.07).",
-  "root_cause_confirmed": "Different bf16 matmul kernel implementations between nano (PyTorch F.linear + separate RMSNorm) and ref (TE's fused LayerNormLinear). Same math, different tiling/accumulation order in bf16 produces 1-2 ULP per-element diff per block. Compounds through 9 layers.",
-  "to_fully_close_gap": [
+  "root_cause_confirmed_historical": "Different bf16 matmul kernel implementations between nano (PyTorch F.linear + separate RMSNorm) and ref (TE's fused LayerNormLinear). Same math, different tiling/accumulation order in bf16 produces 1-2 ULP per-element diff per block. Compounds through 9 layers.",
+  "to_fully_close_gap_historical": [
     "Replace nano's (RMSNorm + F.linear) with TE's fused LayerNormLinear",
     "Or replace nano's SwiGLU MLP with TE's fused bias_swiglu",
     "Or train nano in fp32 (slow but mathematically identical)"
-  ]
+  ],
+  "resolution_v10_2026_04_23": {
+    "actual_root_cause": "RoPE implementation, not LayerNormLinear fusion. Commit a97ce75 replaced te.apply_rotary_pos_emb with megatron.core.extensions.transformer_engine.fused_apply_rotary_pos_emb and accounted for 95%+ of per-layer systematic drift.",
+    "other_fixes_landed": ["373cbb3 SwiGLU fp32 silu*up", "e8b6c2c MoE fp32 weighted sum", "d0223fe te.GroupedLinear for expert MLPs", "076fb6d input-based EOD mask"],
+    "post_fix_per_block": {
+      "block_0_dense": "BITWISE (L1=2.43e-7, L_inf=1 ULP)",
+      "blocks_1_to_8_moe": "L1≈8.8e-4 per block, verified as bf16 ULP noise on max-magnitude ~188 activations (1 bf16 ULP ≈ 1.0)"
+    },
+    "post_fix_e2e_loss": "7485-iter retrain last-100-mean: nano=2.853937, ref=2.849259, Δ=+0.0047 nat (< 1/10 step-to-step stdev 0.065). See ALIGNMENT.md v10 FINAL."
+  }
 }
