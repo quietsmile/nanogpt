@@ -92,11 +92,16 @@ class TEAttn(nn.Module):
         v = qkv[..., self.q_size+self.k_size:].view(B, T, self.n_kv_head, self.head_dim)
         # qk_layernorm
         q = self.q_ln(q); k = self.k_ln(k)
-        # TE RoPE (bshd format)
-        from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
-        freqs = self.rope_freqs[:T]
-        q = apply_rotary_pos_emb(q, freqs, tensor_format='bshd')
-        k = apply_rotary_pos_emb(k, freqs, tensor_format='bshd')
+        # Use FUSED RoPE (matches ref bitwise, unlike TE non-fused apply_rotary_pos_emb)
+        from megatron.core.extensions.transformer_engine import fused_apply_rotary_pos_emb
+        freqs = self.rope_freqs[:T]  # [T, 1, 1, D]
+        # fused expects sbhd format — permute [B,S,H,D] → [S,B,H,D]
+        q_sbhd = q.transpose(0, 1).contiguous()
+        k_sbhd = k.transpose(0, 1).contiguous()
+        q_sbhd = fused_apply_rotary_pos_emb(q_sbhd, freqs, interleaved=False)
+        k_sbhd = fused_apply_rotary_pos_emb(k_sbhd, freqs, interleaved=False)
+        q = q_sbhd.transpose(0, 1).contiguous()
+        k = k_sbhd.transpose(0, 1).contiguous()
         # Attention
         out = self.dpa(q, k, v)  # [B, T, n_head*head_dim]
         # c_proj
