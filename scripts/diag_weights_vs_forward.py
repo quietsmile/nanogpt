@@ -64,7 +64,7 @@ def forward_on_batch(model, sample_indices, data_mmap, dtype=torch.bfloat16):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--mode', required=True, choices=['A', 'B', 'C'])
-    ap.add_argument('--attention-impl', default='sdpa', choices=['sdpa', 'fp32_manual'])
+    ap.add_argument('--attention-impl', default='sdpa', choices=['sdpa', 'fp32_manual', 'te'])
     ap.add_argument('--fwd-dtype', default='bf16', choices=['bf16', 'fp32'])
     ap.add_argument('--data', default=os.path.join(ROOT, 'data/cybertron_baseline/train.bin'))
     ap.add_argument('--out', default=None)

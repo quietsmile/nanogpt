@@ -150,6 +150,16 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
         self.attention_impl = getattr(config, 'attention_impl', 'sdpa')
+        if self.attention_impl == 'te':
+            import transformer_engine.pytorch as _te
+            self._te_attn = _te.DotProductAttention(
+                num_attention_heads=config.n_head,
+                kv_channels=self.head_dim,
+                num_gqa_groups=self.n_kv_head,
+                attention_dropout=0.0,
+                qkv_format='bshd',
+                attn_mask_type='causal',
+            )
 
     def forward(self, x, attn_mask=None, position_ids=None):
         B, T, C = x.size()
@@ -167,8 +177,8 @@ class CausalSelfAttention(nn.Module):
 
             q, k = self.rotary_emb(q, k, seq_len=T, position_ids=position_ids)
 
-            # Expand KV heads for GQA
-            if self.n_rep > 1:
+            # Expand KV heads for GQA (SDPA/manual need full-head KV; TE handles GQA natively)
+            if self.n_rep > 1 and self.attention_impl != 'te':
                 k = k.unsqueeze(2).expand(B, self.n_kv_head, self.n_rep, T, self.head_dim)
                 k = k.reshape(B, self.n_head, T, self.head_dim)
                 v = v.unsqueeze(2).expand(B, self.n_kv_head, self.n_rep, T, self.head_dim)
@@ -179,7 +189,16 @@ class CausalSelfAttention(nn.Module):
             q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
             v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
-        if self.attention_impl == 'fp32_manual':
+        if self.attention_impl == 'te':
+            # TE expects [B, S, H, D] with qkv_format='bshd'. We have q/k/v as [B, H, S, D].
+            # Force matching dtype (all bf16 under autocast).
+            common_dtype = torch.bfloat16 if torch.is_autocast_enabled() else q.dtype
+            q_te = q.transpose(1, 2).contiguous().to(common_dtype)
+            k_te = k.transpose(1, 2).contiguous().to(common_dtype)
+            v_te = v.transpose(1, 2).contiguous().to(common_dtype)
+            y = self._te_attn(q_te, k_te, v_te)  # [B, S, H*D]
+            return self.c_proj(y)
+        elif self.attention_impl == 'fp32_manual':
             orig_dtype = q.dtype
             qf = q.float()
             kf = k.float()
@@ -588,7 +607,7 @@ class GPTConfig:
     mask_loss_id: Optional[int] = None     # additional target id masked from loss (e.g. 160000 sentinel)
     seq_aux_balance_alpha: float = 0.0     # α for sequence-wise MoE balance aux loss; 0 = disabled
     use_eod_attn_mask: bool = False        # attention cannot cross EOD within a packed sequence
-    attention_impl: str = 'sdpa'           # 'sdpa' = PyTorch SDPA flash backend (default); 'fp32_manual' = explicit fp32 Q@K^T/softmax/Attn@V (debugging kernel-diff)
+    attention_impl: str = 'sdpa'           # 'sdpa' | 'fp32_manual' | 'te' (TransformerEngine DotProductAttention, matches cybertron kernel)
 
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:

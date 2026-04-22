@@ -120,17 +120,18 @@ Fix: train.py 改 `stride=block_size`，target 取 `[s+1, s+block_size+1]`。
 
 Test A（`scripts/diag_weights_vs_forward.py --mode A`）方法：加载 ref iter N 的 ckpt 到 nano，在 iter N+1 的 batch（ref 用同一 ckpt 实际 forward 过的 batch）上跑 nano forward，和 ref 的 logged single-iter loss 比。
 
-### 三种 forward 配置都得到同一 +0.014 nat
+### 四种 forward 配置都得到同一 +0.014 nat
 
 | forward 配置 | avg Δ (4 ckpts) | stddev |
 |---|---|---|
 | PyTorch SDPA (bf16 autocast) | +0.01387 | 0.00229 |
 | fp32 manual attention（Q@K^T/softmax/Attn@V 全 fp32，其他 bf16） | +0.01386 | 0.00222 |
 | **fp32 everywhere（autocast 关闭）** | **+0.01370** | **0.00227** |
+| **TE DotProductAttention (flash-attn-2 kernel)** | **+0.01387** | **0.00229** |
 
 ### 结论（修正之前的判断）
 
-**attention kernel + bf16 累加都 RULED OUT**：fp32 everywhere forward 仍然差 +0.0137 nat，说明差异不在 bf16 kernel 层面。
+**attention kernel + bf16 累加彻底 RULED OUT**：TE flash-attn-2（cybertron 同款）和 PyTorch SDPA 给出 **bitwise 相同** 的结果（loss 值每个 ckpt 都完全一样）。两套 kernel 底层用同一 flash-attn-2 CUDA 实现。bf16/fp32 精度也与此无关。
 
 ### 当前仍可能的源头
 
