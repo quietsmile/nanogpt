@@ -330,12 +330,15 @@ class MoERouter(nn.Module):
         G = self.n_group
         K = self.topk
 
-        # 1. Compute scores in fp32 (moe_gating_fp32=True): cast both input and weight to fp32
-        logits = F.linear(x.float(), self.linear.weight.float())  # [S, E], fp32
-        scores = torch.sigmoid(logits)                            # [S, E], fp32 — cybertron keeps fp32 through gate weights
-
-        # 2. Add correction bias for routing decision (NOT added to final weights)
-        scores_biased = scores + self.e_score_correction_bias.float()
+        # 1. Compute scores in fp32 (moe_gating_fp32=True). We MUST disable autocast here,
+        # otherwise F.linear's output is downcast to bf16 regardless of .float() on inputs,
+        # producing bf16-rounded logits that route 1-2% of tokens to wrong experts at
+        # boundary cases. Matches cybertron's moe_gating_fp32=True path.
+        with torch.amp.autocast('cuda', enabled=False):
+            logits = F.linear(x.float(), self.linear.weight.float())  # [S, E], fp32
+            scores = torch.sigmoid(logits)                            # [S, E], fp32
+            # 2. Add correction bias for routing decision (NOT added to final weights)
+            scores_biased = scores + self.e_score_correction_bias.float()
 
         # 3. Routing: flat top-K (cybertron routing_type='greedy') OR group-limited.
         if self.routing_type == 'greedy':
