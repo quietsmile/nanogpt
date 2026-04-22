@@ -172,8 +172,18 @@ async function main() {
   // ----- bitwise -----
   const bw = await getJSON('../reports/bitwise_resume.json');
   if (bw) {
-    const ok = bw.pass;
-    pill('bw-status', ok ? 'ok' : 'err', ok ? 'pass' : 'fail');
+    // Schema: {single_gpu: {pass}, ddp_4rank: {pass}, ...}.
+    // "pass" may be a bool (true/false) or the string "near-bitwise (bf16 floor)".
+    const isPass = (v) => v === true || (typeof v === 'string' && /pass|near-bitwise/i.test(v));
+    const sgp = bw.single_gpu && bw.single_gpu.pass;
+    const ddp = bw.ddp_4rank  && bw.ddp_4rank.pass;
+    const sgOK = isPass(sgp);
+    const ddpOK = isPass(ddp);
+    const allOK = sgOK && ddpOK;
+    const label = allOK
+      ? (ddp === true ? 'pass' : 'pass (bf16 floor)')
+      : (sgOK ? 'single-gpu pass' : 'fail');
+    pill('bw-status', allOK ? 'ok' : (sgOK ? 'warn' : 'err'), label);
     document.getElementById('bw-body').innerHTML = `<pre>${JSON.stringify(bw, null, 2)}</pre>`;
   } else {
     pill('bw-status', 'warn', 'pending GPU');
