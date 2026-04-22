@@ -2,6 +2,41 @@
 
 > 将 nanogpt 对齐到 Megatron ref（scaling_moe_00196 / PAI job `dlc1q9arre48b0kx`），bf16 ULP 级别。
 
+---
+
+## 🎯 v10 FINAL (2026-04-23) — 完整 7485 步 retrain 对齐到 bf16 精度 floor
+
+**Last-100-iter mean Δ = +0.0047 nat**（< 1/10 step-to-step stdev 0.065）。下方 "最终结果" 和 "残留 diff" 两节描述的是 v6 阶段的 +0.014 nat 诊断，v10 之后被一系列 kernel 对齐修复进一步降到 +0.005 nat，结论也改写：
+
+| 阶段 | 关键改动 | final Δ |
+|---|---|---|
+| v6（下文表格 "v6 对齐版"） | LR off-by-one / optim state 加载 / aux-free bias 频率 | +0.003 / +0.014 |
+| v10 FINAL | 下列 kernel 修复叠加 | **+0.0047** |
+
+**v10 阶段关键修复**（按重要度）：
+
+1. `a97ce75` — 用 `megatron.core.extensions.transformer_engine.fused_apply_rotary_pos_emb` 替换 `te.apply_rotary_pos_emb`。**单一修复贡献了 95%+ 的 per-layer systematic drift**。
+2. `373cbb3` — SwiGLU `silu(gate) * up` 在 fp32 计算。
+3. `e8b6c2c` — MoE expert 输出 weighted sum 在 fp32。
+4. `d0223fe` — 用 `te.GroupedLinear` 替换 per-expert `F.linear`（**与下文 v6 结论"MoE MLP kernel 需换成 TE grouped_gemm"一致**）。
+5. `076fb6d` — EOD mask 改为 input-based（`loss_mask[data == eod_token] = 0.0`），匹配 ref。
+6. `b4f9e75` — DDP strict-determinism NCCL/CUDA 环境变量（DDP resume drift 2e-3 → 3e-5）。
+
+**v10 的诊断更正 v6 的归因**：
+
+- v6 认为残留 +0.014 nat 主要来自 "nano bucket+bmm MoE kernel vs TE grouped_gemm"；实际上 `te.GroupedLinear` 换过之后还是有残留，**真正的系统性源头是 RoPE 实现差异**（`fused_apply_rotary_pos_emb` vs `te.apply_rotary_pos_emb` 在 bf16 下每层累积的 tiling 差）。
+- Block 0（dense layer）现在 bitwise：L1=2.43e-7。
+- Block 1-8（MoE）每层 L1 ≈ 8.8e-4，验证为 bf16 ULP 噪声（最大值 188 → 1 bf16 ULP ≈ 1.0）。
+
+**Bitwise resume 状态**（`reports/bitwise_resume.json`）：
+
+- Single-GPU: A 路径 resume → 20 步 state_dict/optim sha256 bitwise = B 路径 straight 20 步。PASS。
+- DDP 4-rank: iter-20 drift 3e-5（near bf16 floor，NCCL reduce-order 残留）。
+
+下面 v1-v6 的章节保留作为 alignment 问题排查的历史档案。
+
+---
+
 ## 最终结果（7485 步 full run）
 
 | 阶段 | final Δ_loss | max\|Δ\| |
