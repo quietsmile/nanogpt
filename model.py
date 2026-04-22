@@ -830,16 +830,21 @@ class GPT(nn.Module):
             with torch.amp.autocast('cuda', enabled=False):
                 logits = F.linear(x.float(), self.lm_head.weight.float())
             t_flat = targets.view(-1)
-            # Mask positions where target is EOD or mask_loss_id (eod_mask_loss, mask_loss_id)
+            # Mask positions where the INPUT token is EOD or mask_loss_id (matches
+            # Megatron's `loss_mask[data == eod_token] = 0` semantics — mask is
+            # keyed on INPUT at position i, NOT target. Previously nano masked
+            # where target[i] == EOD, which is off-by-one (masks position before EOD
+            # instead of EOD position itself). Fix: use idx (input) for masking.
             mask_ids = []
             if getattr(self.config, 'eod_token_id', None) is not None:
                 mask_ids.append(self.config.eod_token_id)
             if getattr(self.config, 'mask_loss_id', None) is not None:
                 mask_ids.append(self.config.mask_loss_id)
             if mask_ids:
-                mask = torch.zeros_like(t_flat, dtype=torch.bool)
+                idx_flat = idx.view(-1)
+                mask = torch.zeros_like(idx_flat, dtype=torch.bool)
                 for mid in mask_ids:
-                    mask = mask | (t_flat == mid)
+                    mask = mask | (idx_flat == mid)
                 t_flat = torch.where(mask, torch.full_like(t_flat, -1), t_flat)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), t_flat, ignore_index=-1)
             # Add sequence-wise MoE balance aux
