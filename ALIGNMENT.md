@@ -116,36 +116,37 @@ Fix: train.py 改 `stride=block_size`，target 取 `[s+1, s+block_size+1]`。
 - mb=1 受限于 lm_head logits tensor 内存（`[mb×T, V=152064]` 在 mb≥2 会 OOM）
 - 7485 步全跑 ~4.5h
 
-## 残留 diff — 已定位为 forward kernel diff
+## 残留 diff — 系统性 +0.014 nat，已排除多个候选
 
-**Test A（`scripts/diag_weights_vs_forward.py --mode A`）定位 0.014 nat 的 pure forward-kernel-diff**：
+Test A（`scripts/diag_weights_vs_forward.py --mode A`）方法：加载 ref iter N 的 ckpt 到 nano，在 iter N+1 的 batch（ref 用同一 ckpt 实际 forward 过的 batch）上跑 nano forward，和 ref 的 logged single-iter loss 比。
 
-加载 ref iter N 的 ckpt 到 nano，在 iter N+1 的 batch（ref 用同一 ckpt 实际 forward 过的 batch）上跑 nano forward，和 ref 的 logged loss 比：
+### 三种 forward 配置都得到同一 +0.014 nat
 
-| ref ckpt | batch iter | nano_fwd | ref_logged | Δ |
-|---|---|---|---|---|
-| 1497 | 1498 | 3.3978 | 3.3873 | +0.0105 |
-| 2994 | 2995 | 3.3709 | 3.3553 | +0.0157 |
-| 4491 | 4492 | 3.0715 | 3.0572 | +0.0143 |
-| 5988 | 5989 | 3.0725 | 3.0575 | +0.0150 |
+| forward 配置 | avg Δ (4 ckpts) | stddev |
+|---|---|---|
+| PyTorch SDPA (bf16 autocast) | +0.01387 | 0.00229 |
+| fp32 manual attention（Q@K^T/softmax/Attn@V 全 fp32，其他 bf16） | +0.01386 | 0.00222 |
+| **fp32 everywhere（autocast 关闭）** | **+0.01370** | **0.00227** |
 
-**avg Δ = +0.0139 nat, stddev = 0.0023**
+### 结论（修正之前的判断）
 
-同权重、同 batch、只换 forward kernel → nano SDPA 系统性比 TE flash-attn-2 高 0.014 nat。方向在 4 个独立 ckpt 上 100% 一致。
+**attention kernel + bf16 累加都 RULED OUT**：fp32 everywhere forward 仍然差 +0.0137 nat，说明差异不在 bf16 kernel 层面。
 
-这个 +0.014 nat 是 **2×** 训练中 20-iter rolling avg 残留 diff（+0.007 nat）—— 意味着 trained weights 其实几乎相同，中段漂移完全由 forward kernel 差异贡献（且 training 过程还略微对冲了一部分）。
+### 当前仍可能的源头
 
-### 根因候选（按优先级）
+1. **MoE routing / dispatch 语义差异** — nano dense×mask vs ref `allgather` dispatcher。不是 bf16 rounding 的事，可能是 topk 决策边界或 normalize 顺序导致路由不同（路由不同 → 经过的 experts 不同 → loss 差系统性偏一边）
+2. **权重转换 converter 的细节** — 某个 tensor 的 layout/scale 有微差但 shape 对得上（converter 已覆盖 QKV/SwiGLU/144-experts shard，但可能还有没覆盖的 buffer 或 norm weight）
+3. **Loss 层面的某个 mask 处理** — ref 的 `loss_mask` 计算逻辑（EOD / reset_position / packed docs 边界）与 nano 的 `eod_mask_loss + mask_loss_id` 可能有差异
 
-1. **PyTorch SDPA flash backend vs TE flash-attn-2 的 Q@K^T / Attn@V bf16 tiling 顺序** — 最可能
-2. MoE dense×mask vs ref allgather dispatcher 的 bf16 scatter/gather 累加顺序
-3. Adam 内部 bf16 update 顺序（PyTorch fused AdamW vs apex FusedAdam）
+### 已排除的候选
 
-### 要压到 ±0.001 nat 的可能路径
-
-- 把 nano attention 换成 TE flash-attn-2 同一套 kernel（最直接）
-- 或在 attention 里用 manual fp32 matmul 绕开 bf16 累加
-- 或整个训练转 fp32
+- ❌ bf16 attention matmul 累加顺序（fp32 attn 同结果）
+- ❌ bf16 linear / MoE grouped_mm 累加（fp32 everywhere 同结果）
+- ❌ RMSNorm variance 精度（已 fp32）
+- ❌ RoPE 精度（已 fp32 compute）
+- ❌ MoE aux-free expert bias 未加载（已确认转换并加载 8 层×144）
+- ❌ train.bin 和 ref 的 sampler offset 不匹配（Test C 扫描 batch iter 5985-5992，观察到 iter 5989 onwards 稳定 +0.014 nat，iter<5989 稳定 negative Δ 呈现训练过程中的 loss decay 模式，符合 "iter-N ckpt = 训练过 N 次的 weights → 再 forward iter-(N+1) batch 是最新 fresh batch" 的预期）
+- ❌ 初始化阶段（iter 0 bitwise 对齐 +0.0001 nat）
 
 ## 关键文件
 

@@ -26,7 +26,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, SCRIPT_DIR)
 
 
-def build_nano():
+def build_nano(attention_impl='sdpa'):
     from model import GPTConfig, GPT
     cfg = GPTConfig(
         block_size=8192, vocab_size=152064, n_layer=9, n_head=4, n_embd=512,
@@ -40,17 +40,19 @@ def build_nano():
         moe_shared_expert_hidden_size=160, moe_routing_type='greedy',
         eod_token_id=151643, mask_loss_id=160000,
         seq_aux_balance_alpha=0.0001, use_eod_attn_mask=False,
+        attention_impl=attention_impl,
     )
     return GPT(cfg), cfg
 
 
-def forward_on_batch(model, sample_indices, data_mmap):
+def forward_on_batch(model, sample_indices, data_mmap, dtype=torch.bfloat16):
     """DDP-style forward: rank r handles samples[r::world]. Returns local loss average."""
     device = next(model.parameters()).device
     raw = model.module if hasattr(model, 'module') else model
     raw.eval()
     losses = []
-    with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
+    ctx = torch.amp.autocast('cuda', dtype=dtype) if dtype == torch.bfloat16 else torch.amp.autocast('cuda', enabled=False)
+    with torch.no_grad(), ctx:
         for sid in sample_indices:
             idx = torch.from_numpy(np.array(data_mmap[sid*8192 : sid*8192+8192].astype(np.int64))).unsqueeze(0).to(device)
             tgt = torch.from_numpy(np.array(data_mmap[sid*8192+1 : sid*8192+8193].astype(np.int64))).unsqueeze(0).to(device)
@@ -61,7 +63,9 @@ def forward_on_batch(model, sample_indices, data_mmap):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--mode', required=True, choices=['A', 'B'])
+    ap.add_argument('--mode', required=True, choices=['A', 'B', 'C'])
+    ap.add_argument('--attention-impl', default='sdpa', choices=['sdpa', 'fp32_manual'])
+    ap.add_argument('--fwd-dtype', default='bf16', choices=['bf16', 'fp32'])
     ap.add_argument('--data', default=os.path.join(ROOT, 'data/cybertron_baseline/train.bin'))
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
@@ -101,12 +105,13 @@ def main():
             ref_dir = f'/prodcpfs/user/yuchen/scaling_exp/auto_test/scaling_moe_00196/iter_{ckpt_iter:07d}'
             meg = load_all_megatron_shards(ref_dir)
             sd = convert(meg)
-            model, _ = build_nano()
+            model, _ = build_nano(attention_impl=args.attention_impl)
             model = model.to(device)
             model.load_state_dict(sd, strict=False)
             all_samples = list(range((next_iter - 1) * 64, next_iter * 64))
             my_samples = [all_samples[i] for i in range(rank, 64, world)]
-            local_loss = forward_on_batch(model, my_samples, arr)
+            local_loss = forward_on_batch(model, my_samples, arr,
+                                          dtype=(torch.bfloat16 if args.fwd_dtype == 'bf16' else torch.float32))
             t = torch.tensor(local_loss, device=device)
             if world > 1:
                 dist.all_reduce(t, op=dist.ReduceOp.AVG)
@@ -125,6 +130,33 @@ def main():
             print(f'[Test A] stddev across 4 ckpts = {statistics.stdev(diffs):.6f}')
             print('\n→ This is pure forward-kernel diff (PyTorch SDPA vs TE flash-attn-2).')
 
+    elif args.mode == 'C':
+        # Test C: with ref 5988 weights, sweep batch iter {5987..5992} to check offset alignment
+        import re
+        ref_losses = {}
+        for line in open('/prodcpfs/user/yuchen/scaling_exp/auto_test/scaling_moe_00196/logs/rank-0-1-scaling_moe_00196-run.log'):
+            m = re.search(r'iteration\s+(\d+)/.*lm loss:\s*([\d.eE+-]+)', line)
+            if m: ref_losses[int(m.group(1))] = float(m.group(2))
+        ref_dir = '/prodcpfs/user/yuchen/scaling_exp/auto_test/scaling_moe_00196/iter_0005988'
+        meg = load_all_megatron_shards(ref_dir)
+        sd = convert(meg)
+        model, _ = build_nano(attention_impl=args.attention_impl)
+        model = model.to(device)
+        model.load_state_dict(sd, strict=False)
+        if rank == 0:
+            print(f'[Test C] ref ckpt iter 5988 → sweep batch iters 5985..5992')
+            print(f'{"batch":>7}{"nano_fwd":>12}{"ref_logged":>12}{"Δ":>10}')
+        for bi in range(5985, 5993):
+            all_samples = list(range((bi - 1) * 64, bi * 64))
+            my_samples = [all_samples[i] for i in range(rank, 64, world)]
+            local_loss = forward_on_batch(model, my_samples, arr,
+                                          dtype=(torch.bfloat16 if args.fwd_dtype == 'bf16' else torch.float32))
+            t = torch.tensor(local_loss, device=device)
+            if world > 1:
+                dist.all_reduce(t, op=dist.ReduceOp.AVG)
+            if rank == 0:
+                rl = ref_losses.get(bi, 0)
+                print(f'{bi:>7}{t.item():>12.6f}{rl:>12.6f}{t.item()-rl:>+10.6f}')
     elif args.mode == 'B':
         # Test B: nano 7000 weights vs ref 7485 weights, same fixed batch
         batch_iter = 100  # fixed eval batch: samples 6400..6463
@@ -137,7 +169,7 @@ def main():
             print(f'  Loading nano iter 7000 ckpt...')
         nano_ckpt = torch.load('/root/nanogpt/out-cybertron-moe-196-from0/ckpt.pt',
                                 map_location='cpu', weights_only=False)
-        model, _ = build_nano()
+        model, _ = build_nano(attention_impl=args.attention_impl)
         model = model.to(device)
         model.load_state_dict(nano_ckpt['model'], strict=False)
         loss_nano = forward_on_batch(model, my_samples, arr)
@@ -151,7 +183,7 @@ def main():
         ref_dir = '/prodcpfs/user/yuchen/scaling_exp/auto_test/scaling_moe_00196/iter_0007485'
         meg = load_all_megatron_shards(ref_dir)
         sd_ref = convert(meg)
-        model_ref, _ = build_nano()
+        model_ref, _ = build_nano(attention_impl=args.attention_impl)
         model_ref = model_ref.to(device)
         model_ref.load_state_dict(sd_ref, strict=False)
         loss_ref = forward_on_batch(model_ref, my_samples, arr)

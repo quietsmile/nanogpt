@@ -149,6 +149,7 @@ class CausalSelfAttention(nn.Module):
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
+        self.attention_impl = getattr(config, 'attention_impl', 'sdpa')
 
     def forward(self, x, attn_mask=None, position_ids=None):
         B, T, C = x.size()
@@ -178,7 +179,21 @@ class CausalSelfAttention(nn.Module):
             q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
             v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
-        if self.flash:
+        if self.attention_impl == 'fp32_manual':
+            orig_dtype = q.dtype
+            qf = q.float()
+            kf = k.float()
+            vf = v.float()
+            att = (qf @ kf.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+            T_q = qf.size(-2)
+            if attn_mask is None:
+                causal = torch.ones(T_q, T_q, dtype=torch.bool, device=qf.device).tril()
+                att = att.masked_fill(~causal, float('-inf'))
+            else:
+                att = att.masked_fill(~attn_mask, float('-inf'))
+            att = torch.nn.functional.softmax(att, dim=-1)
+            y = (att @ vf).to(orig_dtype)
+        elif self.flash:
             if attn_mask is None:
                 y = torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, attn_mask=None,
@@ -570,6 +585,7 @@ class GPTConfig:
     mask_loss_id: Optional[int] = None     # additional target id masked from loss (e.g. 160000 sentinel)
     seq_aux_balance_alpha: float = 0.0     # α for sequence-wise MoE balance aux loss; 0 = disabled
     use_eod_attn_mask: bool = False        # attention cannot cross EOD within a packed sequence
+    attention_impl: str = 'sdpa'           # 'sdpa' = PyTorch SDPA flash backend (default); 'fp32_manual' = explicit fp32 Q@K^T/softmax/Attn@V (debugging kernel-diff)
 
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:

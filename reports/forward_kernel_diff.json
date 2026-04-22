@@ -1,16 +1,35 @@
 {
-  "test": "matched-pair forward kernel diff (Test A)",
-  "method": "load ref iter N ckpt into nano, forward on iter N+1 batch (that ref actually forwarded with those weights), compare to ref's logged single-iter loss",
-  "pairs": [
-    {"ckpt_iter": 1497, "batch_iter": 1498, "nano_fwd": 3.397807, "ref_logged": 3.387269, "delta": 0.010538},
-    {"ckpt_iter": 2994, "batch_iter": 2995, "nano_fwd": 3.370941, "ref_logged": 3.355274, "delta": 0.015667},
-    {"ckpt_iter": 4491, "batch_iter": 4492, "nano_fwd": 3.071536, "ref_logged": 3.057246, "delta": 0.014290},
-    {"ckpt_iter": 5988, "batch_iter": 5989, "nano_fwd": 3.072479, "ref_logged": 3.057512, "delta": 0.014967}
+  "test": "matched-pair forward kernel diff (Test A) — ruling out bf16 kernel as source",
+  "method": "load ref iter N ckpt into nano, forward on iter N+1 batch, compare to ref's logged single-iter loss",
+  "runs": [
+    {
+      "config": "bf16 autocast + PyTorch SDPA flash attention",
+      "avg_delta": 0.013866,
+      "stddev": 0.002288,
+      "pairs": [[1497,1498,3.397807,3.387269,0.010538],[2994,2995,3.370941,3.355274,0.015667],[4491,4492,3.071536,3.057246,0.014290],[5988,5989,3.072479,3.057512,0.014967]]
+    },
+    {
+      "config": "bf16 linears + fp32 manual Q@K^T/softmax/Attn@V",
+      "avg_delta": 0.013862,
+      "stddev": 0.002218
+    },
+    {
+      "config": "fp32 everywhere (autocast disabled)",
+      "avg_delta": 0.013699,
+      "stddev": 0.002273,
+      "pairs_sample": [[4491,4492,3.071360,3.057246,0.014114],[5988,5989,3.072308,3.057512,0.014796]]
+    }
   ],
-  "summary": {
-    "avg_delta_nat": 0.013866,
-    "stddev": 0.002288,
-    "direction": "nano SDPA systematically higher than ref TE flash-attn-2",
-    "conclusion": "Pure forward-kernel-diff alone is 2x larger than mid-training rolling-avg residual (+0.007). Trained weights nearly identical; the residual is fully explained by kernel."
-  }
+  "conclusion": "Three forward configurations — SDPA bf16, manual fp32 attention, fp32 everywhere — all produce essentially the same +0.0137~0.0139 nat delta vs ref. bf16 kernel accumulation and attention implementation are RULED OUT as the source of mid-training residual.",
+  "ruled_out": [
+    "bf16 attention matmul accumulation order",
+    "bf16 linear / MoE grouped_mm accumulation",
+    "RMSNorm / RoPE precision (already fp32)",
+    "MoE expert bias not loaded (verified 8 layers x 144 loaded)"
+  ],
+  "remaining_suspects": [
+    "MoE routing/dispatch SEMANTIC difference (not bf16 rounding) — nano dense-mask vs ref allgather",
+    "Weight converter edge case — subtle layout/scale off for some tensor",
+    "Loss mask computation — ref's loss_mask logic for EOD/packed-doc boundaries vs nano's eod_mask_loss+mask_loss_id"
+  ]
 }
