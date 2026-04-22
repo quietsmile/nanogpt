@@ -282,7 +282,13 @@ class SwiGLUMLP(nn.Module):
         self.dropout   = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        return self.dropout(self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x)))
+        # fp32 silu*up then cast to bf16 — matches TE's fused SwiGLU kernel (single bf16
+        # round at end). Pure `F.silu(g)*u` under autocast rounds silu output to bf16
+        # before multiplication → loses 1 ULP on ~26% of positions.
+        g = self.gate_proj(x)
+        u = self.up_proj(x)
+        h = (F.silu(g.float()) * u.float()).to(x.dtype)
+        return self.dropout(self.down_proj(h))
 
 
 class ExpertMLP(nn.Module):
@@ -295,7 +301,10 @@ class ExpertMLP(nn.Module):
         self.down_proj = nn.Linear(hidden_size, n_embd, bias=bias)
 
     def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        g = self.gate_proj(x)
+        u = self.up_proj(x)
+        h = (F.silu(g.float()) * u.float()).to(x.dtype)
+        return self.down_proj(h)
 
 
 class MoERouter(nn.Module):
@@ -499,7 +508,8 @@ class MoEFFN(nn.Module):
         # Three batched GEMMs: bucket [E, M_per, C] @ weight [E, C, H] → [E, M_per, H]
         gate = torch.bmm(bucket, self.gate_weight)
         up_  = torch.bmm(bucket, self.up_weight)
-        h    = F.silu(gate) * up_
+        # fp32 silu*up then cast — matches TE fused SwiGLU (single bf16 round)
+        h = (F.silu(gate.float()) * up_.float()).to(gate.dtype)
         out_bucket = torch.bmm(h, self.down_weight)                        # [E, M_per, C]
         # Gather expert outputs in sorted (by expert) order, apply weights, then
         # scatter_add back to token positions. This matches Megatron's unpermute
