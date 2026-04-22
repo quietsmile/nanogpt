@@ -40,8 +40,13 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
+        # Variance in fp32, but output must match x.dtype (under autocast, bf16 residual).
+        # If we multiplied by self.weight (fp32) last, the widest-rule would promote output to
+        # fp32, leaking fp32 into the residual stream — ref keeps bf16, so we match by casting
+        # weight too.
         norm = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x.float() * norm).to(x.dtype) * self.weight
+        normed = (x.float() * norm * self.weight.float()).to(x.dtype)
+        return normed
 
 
 class RotaryEmbedding(nn.Module):
@@ -496,17 +501,18 @@ class MoEFFN(nn.Module):
         up_  = torch.bmm(bucket, self.up_weight)
         h    = F.silu(gate) * up_
         out_bucket = torch.bmm(h, self.down_weight)                        # [E, M_per, C]
-        # Gather back to flat sorted order. Promote to fp32 for gate-weighted sum
-        # to match cybertron's token_dispatcher.token_unpermutation path.
-        out_flat = out_bucket[sorted_experts, local_off].float()           # [S*K, C] fp32
-        out_flat = out_flat * sorted_weights.unsqueeze(1)                  # fp32 * fp32
+        # Gather expert outputs in sorted (by expert) order, apply weights, then
+        # scatter_add back to token positions. This matches Megatron's unpermute
+        # path: `output.scatter_add_(0, sorted_indices, permuted_tokens * probs)`
+        # (bf16-sum order differs from per-token K-wise sum, affects loss at ULP level).
+        out_flat = out_bucket[sorted_experts, local_off]                   # [S*K, C] bf16
+        out_flat = out_flat * sorted_weights.unsqueeze(1).to(out_flat.dtype)  # weight in bf16 for ordering
+        # sorted_indices[i] = which token t in original [S] this permuted position belongs to
+        sorted_token_ids = row_ids.div(K, rounding_mode='floor')[order]    # token id per permuted row
+        routed_out = out_bucket.new_zeros(S, C)                            # [S, C] bf16
+        routed_out.scatter_add_(0, sorted_token_ids.unsqueeze(1).expand(-1, C), out_flat)
 
-        # Unsort (inverse permutation) then sum the K expert contributions per token
-        inv_order = torch.empty_like(order)
-        inv_order[order] = torch.arange(S * K, device=x.device)
-        routed_out = out_flat[inv_order].view(S, K, C).sum(dim=1)          # fp32 sum
-
-        out = (shared_out.float() + routed_out).to(x_flat.dtype).view(B, T, C)
+        out = (shared_out + routed_out).view(B, T, C)
 
         # Sequence-wise balance aux loss.
         # Exact match to cybertron_dots3.0_swa/cybertron/models/deepseek_v2/modules_deepseekv2.py:374-378:
@@ -688,6 +694,11 @@ class GPT(nn.Module):
             f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
+        # Cast embedding output to current autocast dtype so residual stream stays in bf16.
+        # Without this, residual stream accumulates in fp32 (embed outputs fp32 + widest-rule adds)
+        # which is MORE precision than ref's bf16 residual — paradoxically causes ref-mismatch.
+        if torch.is_autocast_enabled():
+            tok_emb = tok_emb.to(torch.get_autocast_dtype('cuda'))
 
         if self.config.use_rope:
             x = self.transformer.drop(tok_emb)
