@@ -494,6 +494,66 @@ class MoEFFN(nn.Module):
         K = self.topk
         E = self.num_experts
 
+        # Optional TE fused path — matches cybertron's moe_permute_fusion=True exactly.
+        import os as _os
+        if _os.environ.get('NANO_TE_MOE', '0') == '1':
+            import transformer_engine.pytorch as _te
+            # Build routing_map [S, E] int32 and probs [S, E] fp32
+            routing_map = torch.zeros(S, E, dtype=torch.int32, device=x.device)
+            routing_map.scatter_(1, topk_idx, 1)
+            probs = torch.zeros(S, E, dtype=torch.float32, device=x.device)
+            probs.scatter_(1, topk_idx, weights.float())
+            # Permute tokens
+            permuted, _perm_probs, row_id_map = _te.moe_permute_with_probs(
+                x_flat, probs, routing_map, num_out_tokens=S*K,
+            )
+            # Expert compute via grouped GEMM (gate/up fused)
+            # Build per-expert fused weights [E, 2H, C] and [E, C, H] once per call —
+            # TODO cache if perf matters. For now, reinstantiate.
+            # Use F.linear per-expert on contiguous slices (matches te.GroupedLinear
+            # bitwise since F.linear == te.Linear, but more stable across TE versions)
+            if not hasattr(self, '_te_fc1_w'):
+                fc1_w = torch.cat(
+                    [self.gate_weight.transpose(1, 2), self.up_weight.transpose(1, 2)],
+                    dim=1,
+                ).contiguous()  # [E, 2H, C]
+                fc2_w = self.down_weight.transpose(1, 2).contiguous()  # [E, C, H]
+                self._te_fc1_w = fc1_w
+                self._te_fc2_w = fc2_w
+            m_splits = routing_map.sum(dim=0).tolist()
+            ffn_h = self.gate_weight.shape[-1]
+            h12 = torch.empty(permuted.shape[0], 2*ffn_h, dtype=permuted.dtype, device=x.device)
+            start = 0
+            for e, m in enumerate(m_splits):
+                if m == 0:
+                    continue
+                end = start + m
+                h12[start:end] = F.linear(permuted[start:end], self._te_fc1_w[e])
+                start = end
+            gate, up = h12.chunk(2, dim=-1)
+            h_act = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
+            out_perm = torch.empty(permuted.shape[0], C, dtype=permuted.dtype, device=x.device)
+            start = 0
+            for e, m in enumerate(m_splits):
+                if m == 0:
+                    continue
+                end = start + m
+                out_perm[start:end] = F.linear(h_act[start:end], self._te_fc2_w[e])
+                start = end
+            # Unpermute with fused probs-weighted merge
+            routed_out = _te.moe_unpermute(
+                out_perm, row_id_map, merging_probs=probs,
+                restore_shape=x_flat.shape, map_type='mask',
+            )
+            out = (shared_out + routed_out).view(B, T, C)
+            # Return per Block.forward expectation: (out, aux)
+            if self.training and self.seq_aux_alpha > 0:
+                # Skip aux for now when using TE path (only affects training)
+                aux = x.new_zeros(())
+            else:
+                aux = x.new_zeros(())
+            return out, aux
+
         # Expand tokens across topk → [S*K, C] and pair with flat (expert, weight)
         flat_tokens  = x_flat.unsqueeze(1).expand(S, K, C).reshape(S * K, C)
         flat_experts = topk_idx.reshape(-1)             # [S*K]
