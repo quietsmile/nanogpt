@@ -139,33 +139,47 @@ def main():
     idx_np = np.stack([arr[s*8192:(s+1)*8192].astype(np.int64) for s in SAMPLE_IDS])
     idx = torch.from_numpy(idx_np).to(device)
 
-    captured = {'block0': None}
-    def hook_b0(m, i, o):
-        x = o[0] if isinstance(o, tuple) else o
-        captured['block0'] = x.detach().transpose(0, 1).cpu().contiguous()
-    h = model.transformer.h[0].register_forward_hook(hook_b0)
+    captured = {f'block{i}': None for i in range(9)}
+    captured['ln_f'] = None
+    handles = []
+    for i, block in enumerate(model.transformer.h):
+        def make_hook(idx):
+            def fn(m, inp, o):
+                x = o[0] if isinstance(o, tuple) else o
+                captured[f'block{idx}'] = x.detach().transpose(0, 1).cpu().contiguous()
+            return fn
+        handles.append(block.register_forward_hook(make_hook(i)))
+    handles.append(model.transformer.ln_f.register_forward_hook(
+        lambda m, inp, o: captured.update({'ln_f': o.detach().transpose(0, 1).cpu().contiguous()})))
 
     tgt_np = np.stack([arr[s*8192+1:(s+1)*8192+1].astype(np.int64) for s in SAMPLE_IDS])
     tgt = torch.from_numpy(tgt_np).to(device)
 
     with torch.no_grad(), torch.amp.autocast('cuda', dtype=torch.bfloat16):
         _, loss = model(idx, targets=tgt)
-    h.remove()
+    for h in handles: h.remove()
     print(f'nano+TE-block0 loss: {loss.item():.6f}')
 
-    # Load ref dump for block 0
-    ref_b0 = torch.load(f'{DUMP_DIR}/decoder.layers.0-iter5988-mbs0-forward-output-tp0.1-pp0.1-ep3.4.pt',
-                        weights_only=False, map_location='cpu')
-    ref_b0 = ref_b0[0] if isinstance(ref_b0, tuple) else ref_b0  # [T, B, H]
-    nano_b0 = captured['block0']  # [T, B, H]
-    assert ref_b0.shape == nano_b0.shape
-    a, b = nano_b0.float(), ref_b0.float()
+    # Compare every block's output vs ref
+    print('\n=== Per-block diff with TE block 0 ===')
+    print(f'{"block":<10}{"L∞":>10}{"L1":>12}{"rel_mean":>12}')
+    for i in range(9):
+        ref = torch.load(f'{DUMP_DIR}/decoder.layers.{i}-iter5988-mbs0-forward-output-tp0.1-pp0.1-ep3.4.pt',
+                         weights_only=False, map_location='cpu')
+        ref = ref[0] if isinstance(ref, tuple) else ref
+        a = captured[f'block{i}'].float()
+        b = ref.float()
+        d = (a - b).abs()
+        rel = d.mean() / b.abs().mean().clamp_min(1e-8)
+        print(f'block{i:<5}{d.max().item():>10.4e}{d.mean().item():>12.4e}{rel.item():>12.4e}')
+    ref_f = torch.load(f'{DUMP_DIR}/decoder.final_layernorm-iter5988-mbs0-forward-output-tp0.1-pp0.1-ep3.4.pt',
+                       weights_only=False, map_location='cpu')
+    ref_f = ref_f[0] if isinstance(ref_f, tuple) else ref_f
+    a = captured['ln_f'].float()
+    b = ref_f.float()
     d = (a - b).abs()
-    print(f'block 0 diff (with TE fused LN-QKV + LN-MLP):')
-    print(f'  shape={list(a.shape)}')
-    print(f'  L∞ = {d.max().item():.6e}')
-    print(f'  L1 = {d.mean().item():.6e}')
-    print(f'  rel_mean = {(d.mean()/b.abs().mean().clamp_min(1e-8)).item():.6e}')
+    rel = d.mean() / b.abs().mean().clamp_min(1e-8)
+    print(f'{"ln_f":<10}{d.max().item():>10.4e}{d.mean().item():>12.4e}{rel.item():>12.4e}')
 
 
 if __name__ == '__main__':
