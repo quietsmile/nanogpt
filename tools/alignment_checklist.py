@@ -314,7 +314,7 @@ def check_attention(out, ref, nano):
     _push(out, 'attention', 'apply_rope_fusion',      c['apply_rope_fusion'], True,
           note='CLOSED (commit a97ce75): nano now uses fused_apply_rotary_pos_emb from megatron.core.extensions.transformer_engine when available — matches ref bitwise',
           ref_src='Megatron apply_rotary_pos_emb via TransformerEngine fused kernel',
-          nano_src='nanogpt/model.py RotaryEmbedding — try-imports fused_apply_rotary_pos_emb; falls back to manual rotate_half only when TE unavailable',
+          nano_src='nanogpt/model.py RotaryEmbedding — try-imports fused_apply_rotary_pos_emb; falls back to manual rotate_half on CPU tensors or when TE unavailable (the CUDA-only kernel silently returns NaN on CPU inputs)',
           impact='Was the dominant systematic drift source (~95% of per-layer Δ). With fused kernel: block 0 L1 drops 9.3e-4 → 3.9e-5; with full TE stack: 2.43e-7.')
     _push(out, 'attention', 'RoPE position ids',      'contiguous 0..T-1', 'contiguous 0..T-1',
           note='both do not reset on EOD')
