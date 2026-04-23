@@ -1,0 +1,25 @@
+{
+  "experiment": "fp32_residual=True vs False, iter_0 topk tie-margin",
+  "setup": "Ref iter_0 weights loaded; single sample (8192 tokens) forward; measure top-8 vs top-9 score margin distribution",
+  "results": {
+    "fp32_residual_false": {
+      "median_margin": 1.277e-3,
+      "p5_margin": 9.400e-5,
+      "fraction_in_bf16_ambiguity": 0.98889,
+      "score_range": [0.3625, 0.6485]
+    },
+    "fp32_residual_true": {
+      "median_margin": 1.276e-3,
+      "p5_margin": 8.863e-5,
+      "fraction_in_bf16_ambiguity": 0.98840,
+      "score_range": [0.3624, 0.6484]
+    }
+  },
+  "conclusion": [
+    "fp32 residual stream does NOT widen the topk tie-margin. fraction in bf16 ambiguity is 98.89% either way.",
+    "Root cause: untrained router produces structurally narrow score distribution. With 144 experts and init_std=0.006, logits are N(0, ~0.14) → sigmoid scores are 0.5 ± 0.04, all clustered.",
+    "fp32 residual improves the *precision* of the router INPUT (x), but the score CLUSTERING is determined by the router WEIGHT INITIALIZATION. Wider margins require either (a) larger init_std (violates alignment), (b) trained router (only happens later in training), or (c) fewer experts / larger K ratio.",
+    "Therefore fp32 residual is NOT a viable mitigation for the +0.005 nat gap. The 2× memory cost of fp32 residual buys essentially nothing."
+  ],
+  "implication_for_alignment": "No viable fp32-only mitigation remains. The gap is fundamentally determined by the intersection of (bf16 training + 144-expert MoE + K=8 topk). Closing it requires either a bitwise kernel match to Megatron or a model architecture change. Recommended: accept +0.005 as bf16 MoE floor."
+}
