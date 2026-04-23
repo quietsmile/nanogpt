@@ -646,13 +646,25 @@ class Block(nn.Module):
         self.is_moe = use_moe
 
     def forward(self, x, attn_mask=None, position_ids=None):
-        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, position_ids=position_ids)
+        # fp32 residual ablation: keep x in fp32 across blocks; each sublayer still
+        # runs bf16 internally (under autocast), but the additive combine is fp32.
+        # This removes the bf16 ULP truncation on every residual write that
+        # otherwise compounds over L=9 layers × 7485 steps.
+        fp32_residual = getattr(self.ln_1, '_fp32_residual', False)
+        attn_out = self.attn(self.ln_1(x), attn_mask=attn_mask, position_ids=position_ids)
+        if fp32_residual:
+            x = x.float() + attn_out.float()
+        else:
+            x = x + attn_out
         mlp_in = self.ln_2(x)
         if self.is_moe:
             mlp_out, aux = self.mlp(mlp_in)
         else:
             mlp_out, aux = self.mlp(mlp_in), x.new_zeros(())
-        x = x + mlp_out
+        if fp32_residual:
+            x = x.float() + mlp_out.float()
+        else:
+            x = x + mlp_out
         return x, aux
 
 
@@ -700,6 +712,9 @@ class GPTConfig:
     seq_aux_balance_alpha: float = 0.0     # α for sequence-wise MoE balance aux loss; 0 = disabled
     use_eod_attn_mask: bool = False        # attention cannot cross EOD within a packed sequence
     attention_impl: str = 'sdpa'           # 'sdpa' | 'fp32_manual' | 'te' (TransformerEngine DotProductAttention, matches cybertron kernel)
+    fp32_residual: bool = False            # keep residual stream in fp32; each block casts sublayer outputs
+                                           # to fp32 before x + sublayer(x). Costs ~2x activation memory but
+                                           # removes bf16 ULP noise per block that compounds over L layers × N steps.
 
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:
@@ -723,6 +738,10 @@ class GPT(nn.Module):
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
         )
+        # Propagate fp32_residual flag. Stored on ln_1 as a cheap per-block marker
+        # readable from Block.forward without adding another signature arg.
+        for _blk in transformer_dict['h']:
+            _blk.ln_1._fp32_residual = getattr(config, 'fp32_residual', False)
 
         if config.use_rope:
             # No learned position embeddings when using RoPE
@@ -779,8 +798,10 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
         # Cast embedding output to current autocast dtype so residual stream stays in bf16.
         # Without this, residual stream accumulates in fp32 (embed outputs fp32 + widest-rule adds)
-        # which is MORE precision than ref's bf16 residual — paradoxically causes ref-mismatch.
-        if torch.is_autocast_enabled():
+        # which is MORE precision than ref's bf16 residual. When the fp32_residual
+        # ablation is enabled (config.fp32_residual=True) we intentionally skip the
+        # bf16 downcast so residual stays fp32 end-to-end.
+        if torch.is_autocast_enabled() and not getattr(self.config, 'fp32_residual', False):
             tok_emb = tok_emb.to(torch.get_autocast_dtype('cuda'))
 
         if self.config.use_rope:
