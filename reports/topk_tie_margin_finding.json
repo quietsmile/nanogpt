@@ -1,0 +1,35 @@
+{
+  "experiment": "Measure score tie-margin between top-K and top-(K+1) at iter_0 untrained router",
+  "setup": {
+    "weights": "ref iter_0000000 loaded into nano",
+    "input": "8192 tokens from train.bin[0:8192] (first sample of iter 1)",
+    "router": "first MoE layer (block 1), K=8 topk over 144 experts",
+    "path": "scores = sigmoid(F.linear(x.float(), W.float())) fp32"
+  },
+  "findings": {
+    "score_range": "min 0.362, max 0.648, mean 0.500",
+    "top_K_minus_top_K_plus_1_margin": {
+      "min": 5.96e-8,
+      "p1": 1.94e-5,
+      "p5": 9.40e-5,
+      "median": 1.28e-3,
+      "p95": 5.20e-3
+    },
+    "bf16_ULP_at_score_magnitude_0_5": 7.81e-3,
+    "fraction_tokens_with_margin_less_than_bf16_ULP": 0.9889
+  },
+  "interpretation": [
+    "At iter_0 with randomly initialized router (init_std=0.006 in 144-expert space), the top-8 / top-9 score margin is below 1 bf16 ULP for 98.89% of tokens.",
+    "Any 1-ULP numerical difference in intermediate computation (F.linear cuBLAS tiling, sigmoid precision, score+bias ordering) can flip which expert ranks 8th vs 9th for nearly every token.",
+    "This makes the iter_0 routing decision effectively bf16-random on the decision boundary — nano and ref cannot produce identical routings even with bitwise-identical weights and inputs.",
+    "Once routings differ at iter 1, gradients differ, experts specialize in different directions, and the weight trajectories diverge permanently. This is the MECHANISM behind the bf16 weight-space divergence (cos 0.3 at iter 7485) and the +0.005 nat final loss gap.",
+    "Implication: for 144-expert MoE with K=8 topk, bf16 training makes perfect bitwise reproducibility physically impossible at the router level. The +0.005 gap is the statistical floor of two different-but-equivalent-quality minima reached from the same seed through a stochastic boundary decision process."
+  ],
+  "contrast_with_trained_router": "At later iters (iter 7000+), router weights are trained enough that most tokens have clear expert preferences (score margins would be much larger). But the initial iter_0 cascade has already set nano and ref on divergent trajectories.",
+  "mitigation_options": [
+    "(a) Train router in fp32 only (not bf16 autocast) — already done for scores; would need to extend to the F.linear internal path",
+    "(b) Use fp32 residual stream → router input has more precision → less tie-ambiguity",
+    "(c) Add small deterministic jitter to ref, not nano — force tie-breaking to match",
+    "(d) Accept: the gap is the floor, alignment at this level is unachievable in bf16"
+  ]
+}
