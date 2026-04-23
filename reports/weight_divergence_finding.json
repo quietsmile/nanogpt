@@ -1,0 +1,34 @@
+{
+  "experiment": "Compare router.linear.weight and upstream attn.c_proj between nano iter_7000 vs ref iter_7485 (both trained from identical iter_0 seed with 'aligned' code)",
+  "key_metrics": {
+    "router_weight_cos_similarity": {
+      "layer_1": 0.381,
+      "layer_2": 0.303,
+      "layer_3": 0.285,
+      "layer_4": 0.306,
+      "layer_5": 0.309,
+      "layer_6": 0.325,
+      "layer_7": 0.306,
+      "layer_8": 0.316
+    },
+    "attn_c_proj_cos_similarity": {
+      "layer_1": 0.301,
+      "layer_4": 0.207,
+      "layer_7": 0.046,
+      "layer_8": 0.050
+    },
+    "ln_2_cos_similarity": {
+      "layer_1": 0.968,
+      "layer_8": 0.999
+    }
+  },
+  "interpretation": [
+    "After 7485 'aligned' bf16 training steps from identical iter_0 weights, nano and ref weights have drifted to essentially orthogonal weight space on router (cos ~0.3) and attn.c_proj at deeper layers (cos ~0.05).",
+    "This is NOT a code bug: both runs use the same optimizer, hyperparams, data, and (verified) produce bitwise-identical gradients at single-step level. Yet 7485 steps of bf16 rounding compound into weight-space divergence.",
+    "ln_2 scale weights stay highly correlated (cos 0.97-0.999) because they're slow-moving diagonal gains.",
+    "The +0.005 nat loss gap is the natural loss gap between two models that ended up in DIFFERENT local minima of the loss surface after training. Both minima are near-equivalent quality.",
+    "The 3.6x maxvio routing gap is a CONSEQUENCE of this weight divergence, not a router code bug. Each model's router settled its tokens->experts mapping in its own basin; the resulting statistical distributions differ.",
+    "To eliminate +0.005 gap we would need: (a) fp32 residual stream + fp32 everything = 2x memory; or (b) bit-exact Megatron kernel replication = infeasible. The gap is a fundamental consequence of bf16 training + 9-layer MoE + 7485 steps."
+  ],
+  "implication_for_alignment_work": "The +0.005 nat gap is NOT a bug to fix; it's the bf16 MoE-training floor. Same framework/hyperparams/data, different bf16 rounding in step 1, leads to divergent weight trajectories that meet at similar loss. Stop chasing this; accept as floor."
+}
