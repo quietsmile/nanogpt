@@ -1,0 +1,20 @@
+{
+  "finding": "The 3.6x nano-vs-ref maxvio gap reported earlier (745b173, 8c89dba) was a measurement bug, not a routing divergence.",
+  "apples_to_apples_experiment": {
+    "setup": "Load ref iter_0 weights into nano. Run 8 microbatches of 4 samples each (matching ref's DP=2, mb=4 config on rank 0). Per-microbatch per-layer: maxvio = (counts.max() - counts.mean()) / counts.mean(), using ref's exact cybertron modules_deepseekv2:547 formula. Average across (mbs x layers) = 64 measurements.",
+    "nano_result": {"max": 3609.92, "mean": 455.11, "maxvio": 6.932},
+    "ref_iter1_master_log": {"max": 3616.06, "mean": 455.11, "maxvio": 6.95},
+    "delta": "0.26% maxvio, 0.17% max — match within bf16 ULP noise"
+  },
+  "original_bug": "nano's train.py logged `maxvio_micro_batch` as max over [L, E] of counts SUMMED across 64 microbatches, / grad_accum_steps. This is NOT the same as ref's per-microbatch maxvio (max of a single [E] vector). Summing 64 mbs smooths out peaks (which shift across mbs), giving a LOWER max-to-mean ratio — that's why nano looked 3.6x more 'uniform' than ref. Both are computing stats correctly; the stats themselves are different quantities.",
+  "correct_interpretation_of_earlier_diagnostics": [
+    "`maxvio gap 3.6x` — measurement bug, NOT a real router divergence",
+    "The 'nano routes more uniformly' narrative was wrong",
+    "`expert_bias range within 4%` (7c48dc3) is still correct — biases DO converge to the same operating point",
+    "`router weight cos=0.3 at iter 7000` (02b6712) is still correct — weights DO drift to orthogonal space over 7485 steps",
+    "`topk 98.9% in bf16 ambiguity at iter_0` (6bc101d) is still correct — numerical path makes iter_0 routing non-bitwise",
+    "But the +0.005 loss gap is still unexplained. It's not the 'bf16 floor' — that was overclaim (corrected in 50a3551, overclaim_correction_20260423 in topk_tie_margin_finding.json)."
+  ],
+  "dashboard_fix": "refresh_runs.py now computes maxvio from moe_per_layer as mean across layers of per-layer (max-mean)/mean. This matches ref's formula but with nano's mb=1 granularity. Residual ~2x scale difference between nano mb=1 and ref mb=4 is inherent to microbatch size — smaller samples = higher per-mb variance. NOT fixable from the log alone; would need nano to train with mb=4 or to aggregate 4 mb=1 forwards before computing stats.",
+  "next_step": "Now that the measurement artifact is removed, revisit whether there's any real routing divergence. Current evidence: apples-to-apples iter_1 match to 0.26%. Need more iterations of apples-to-apples comparison to see if divergence grows."
+}

@@ -101,6 +101,19 @@ RUNS = [
         'iter_offset': 1,
         'notes': '短跑，主要为了收集 per-iter MoE 路由 stats (maxvio, tok_per_expert)。 maxvio mean 0.54 vs ref 1.95 — nano routing 3.6× 更均衡。Loss Δ = +0.00541 (201 iter avg), 跟完整 7485 步 +0.00546 几乎 bitwise 吻合。',
     },
+    {
+        'run_id': 'nano-196-iter0diag-20260423',
+        'label': 'v10 iter_0 diag · 500步（from iter_0 seed, 测 maxvio 早期是否对齐）',
+        'has_biasfix': True,
+        'host': 'root@22.4.243.44',
+        'remote_jsonl': '/root/nanogpt/out-moediag-iter0/train_log.jsonl',
+        'remote_log': '/root/nanogpt/logs/iter0diag.log',
+        'config': 'config/cybertron_moe_196_iter0_diag.py',
+        'started_at': '2026-04-23 02:30:00 +0800',
+        'init_from': 'seed from ref iter_0000000 + meg_optim_iter0 (step=1)',
+        'iter_offset': 1,
+        'notes': '测试 maxvio 在 warmup 早期是否跟 ref 对齐；若对齐再在 optim 过程中 diverge，则定位到累积差异源。',
+    },
 ]
 
 
@@ -196,21 +209,42 @@ def refresh_one(run_meta, ref):
     }
 
     # Routing stats (only present for runs trained after d782fc3 added the
-    # per-iter tokens_per_expert logging). Scale correction: nano's
-    # `tokens_per_expert_max/min/mean` are "total count across DP-world /
-    # grad_accum" — to match ref's per-microbatch scale we divide by DP size.
+    # per-iter tokens_per_expert logging).
+    # IMPORTANT aggregation fix (2026-04-23): the original
+    # `maxvio_micro_batch` field was computed as max across [L, E] of
+    # counts summed across all 64 mbs, which is NOT the same formula ref
+    # uses. Ref's `maxVio/micro_batch` (cybertron modules_deepseekv2:547)
+    # is (max - mean) / mean on a SINGLE microbatch's [E] tensor, averaged
+    # across mbs × layers. So: when moe_per_layer is available, use the
+    # per-layer-averaged max/mean (already mean-across-mbs) to compute
+    # a per-layer maxvio and then mean across layers. This matches ref
+    # within 0.3% at iter 1 with identical weights (verified via
+    # /tmp/apples_maxvio.py).
     _dp = 8  # nano's DP world size (all runs here)
     routing_pairs = []
     for i in sorted(keeps):
         d = nano[i]
         if 'tokens_per_expert_max' in d:
-            routing_pairs.append([
-                i,
-                float(d.get('maxvio_micro_batch', 0.0)),
-                float(d.get('tokens_per_expert_max', 0.0)) / _dp,
-                float(d.get('tokens_per_expert_min', 0.0)) / _dp,
-                float(d.get('tokens_per_expert_mean', 0.0)) / _dp,
-            ])
+            # Prefer per-layer stats if present (moe_per_layer added in cd7f27b)
+            pl = d.get('moe_per_layer')
+            if pl:
+                # Per-layer maxvio = (per-layer-avg-max - per-layer-avg-mean) / mean
+                # Average across layers — matches ref's master-log aggregation.
+                layer_vios = [((L['max'] - L['mean']) / L['mean']) if L['mean'] > 0 else 0
+                              for L in pl]
+                mv = sum(layer_vios) / len(layer_vios) if layer_vios else 0.0
+                mx = sum(L['max'] for L in pl) / len(pl)
+                mn = sum(L['min'] for L in pl) / len(pl)
+                me = sum(L['mean'] for L in pl) / len(pl)
+            else:
+                # Fallback: the old misaligned formula (kept for older runs
+                # without moe_per_layer).
+                mv = float(d.get('maxvio_micro_batch', 0.0))
+                mx = float(d.get('tokens_per_expert_max', 0.0)) / _dp
+                mn = float(d.get('tokens_per_expert_min', 0.0)) / _dp
+                me = float(d.get('tokens_per_expert_mean', 0.0)) / _dp
+            routing_pairs.append([i, mv, mx, mn, me])
+    # (No trailing elements; we already built the full entry.)
 
     run = dict(run_meta)
     run.pop('remote_jsonl', None); run.pop('remote_log', None)

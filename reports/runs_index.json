@@ -54,5 +54,13 @@
     "has_biasfix": true,
     "started_at": "2026-04-23 01:24:00 +0800",
     "file": "runs/nano-196-moediag-20260423.json"
+  },
+  {
+    "run_id": "nano-196-iter0diag-20260423",
+    "label": "v10 iter_0 diag \u00b7 500\u6b65\uff08from iter_0 seed, \u6d4b maxvio \u65e9\u671f\u662f\u5426\u5bf9\u9f50\uff09",
+    "iters_completed": 200,
+    "has_biasfix": true,
+    "started_at": "2026-04-23 02:30:00 +0800",
+    "file": "runs/nano-196-iter0diag-20260423.json"
   }
 ]
