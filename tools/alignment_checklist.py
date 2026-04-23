@@ -206,11 +206,11 @@ def check_optimizer(out, ref, nano):
     _push(out, 'optimizer', 'weight_decay',    c['weight_decay'], nano.get('weight_decay'))
     _push(out, 'optimizer', 'clip_grad',       c['clip_grad'], nano.get('grad_clip'))
     _push(out, 'optimizer', 'accumulate_allreduce_grads_in_fp32',
-          c['accumulate_allreduce_grads_in_fp32'], False,
-          note='ref: grad accumulation + DP all-reduce in fp32. nano: bf16 throughout (PyTorch DDP bucket reduces in param dtype = bf16).',
-          ref_src='Megatron grad_accumulate_in_fp32=True stores gradient buffer as fp32',
-          nano_src='nanogpt uses default torch DDP which reduces grads in param dtype (bf16)',
-          impact='bf16 has only ~3 decimal digits of mantissa. Gradient averaging over 8 ranks in bf16 has additional rounding vs fp32. Per-step per-param error ~1e-4 relative; grows linearly in step count. Over 2000 steps the bias could explain 0.1–0.3 nat of the observed gap. Likely a real contributor.')
+          c['accumulate_allreduce_grads_in_fp32'], True,
+          note='CLOSED 2026-04-23: nano params are stored as fp32 (not bf16 like Megatron) under autocast(bf16). Gradients are always fp32 (PyTorch auto-promotes to param dtype). DDP all-reduce therefore happens on fp32 grads by default — same as Megatron with this flag on. Empirically verified: p.grad.dtype == torch.float32 for all params after backward under autocast(bf16). Not a real diff.',
+          ref_src='Megatron grad_accumulate_in_fp32=True stores gradient buffer as fp32 (needed because params are bf16 there)',
+          nano_src='nanogpt params are fp32; p.grad is therefore fp32; DDP bucket reduce on fp32',
+          impact='no impact — nano already equivalent to ref on this axis.')
     _push(out, 'optimizer', 'use_distributed_optimizer',
           c['use_distributed_optimizer'], False,
           note='nano: no ZeRO-style sharded optimizer. Each rank holds full optimizer state.',
