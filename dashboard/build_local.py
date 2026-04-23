@@ -378,6 +378,10 @@ function renderModel() {
 // Multi-select: persist selected run indices in memory across re-renders.
 // Default: pick the latest run (last in list) only — keeps initial chart clean.
 let SELECTED_RUN_IDXS = null;  // Set<int>; null = uninitialized, use default
+let RUN_COLOR_OVERRIDES = {};  // {runIdx: '#hex'} — user-picked colors
+let SHOW_DIFF_MODE = false;    // false: plot raw loss; true: plot Δ (nano − ref)
+const REF_COLOR = '#79c0ff';
+
 function defaultSelectedIdxs(runs) {
   if (!runs || runs.length === 0) return new Set();
   return new Set([runs.length - 1]);  // latest only
@@ -398,10 +402,33 @@ function setAllRunIdxs(on) {
   if (on) for (let i = 0; i < runs.length; i++) SELECTED_RUN_IDXS.add(i);
   renderLoss();
 }
+function setRunColor(i, hex) {
+  RUN_COLOR_OVERRIDES[i] = hex;
+  renderLoss();
+}
+function setDiffMode(on) {
+  SHOW_DIFF_MODE = !!on;
+  renderLoss();
+}
 
-// Distinct colors per run (cycled). Index 0 → ref (blue reserved), so runs use indexes 1+.
-const RUN_COLORS = ['#7ee787', '#ff7b72', '#d2a8ff', '#ffa657', '#79c0ff',
-                    '#a5d6ff', '#f0883e', '#3fb950', '#db61a2', '#ffdf5d'];
+// Categorical high-contrast palette (Plotly-compatible). Chosen so any two
+// neighbors in index order are visually distinct even with partial colorblindness.
+// User can override per-run via setRunColor.
+const RUN_COLORS = [
+  '#e6194B', // red
+  '#3cb44b', // green
+  '#ffe119', // yellow
+  '#f58231', // orange
+  '#911eb4', // purple
+  '#42d4f4', // cyan
+  '#f032e6', // magenta
+  '#a52a2a', // brown
+  '#800000', // maroon
+  '#aaffc3', // mint
+  '#808000', // olive
+  '#ffd8b1', // apricot
+];
+function runColor(i) { return RUN_COLOR_OVERRIDES[i] || RUN_COLORS[i % RUN_COLORS.length]; }
 
 function renderLoss() {
   const l = DATA.loss, tb = DATA.tb;
@@ -419,21 +446,28 @@ function renderLoss() {
   const cmp = rm?.compare || l?.compare || {};
 
   // Multi-select checkbox picker (replaces the old single-select dropdown).
-  // Each checkbox toggles whether that run's traces appear in the chart;
-  // Plotly's legend-click also toggles individual visibility after render.
+  // Each row has: [checkbox] [color picker] [run id] — [label].
+  // Color input lets user override the palette per run.
+  // A second toolbar row toggles raw-loss vs Δ(nano − ref) view.
   const picker = runs.length > 0 ? `
     <div style="margin:4px 0 10px;font-size:12px;">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">
         <span class="small">experiments (click to toggle; Megatron ref always shown):</span>
         <button onclick="setAllRunIdxs(true)"  style="background:#0b0e13;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;">select all</button>
         <button onclick="setAllRunIdxs(false)" style="background:#0b0e13;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;">select none</button>
+        <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-left:auto;">
+          <input type="checkbox" ${SHOW_DIFF_MODE ? 'checked' : ''} onchange="setDiffMode(this.checked)">
+          <span class="small">show Δ (nano − ref) — makes bf16-floor gap visible</span>
+        </label>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;padding:6px 10px;background:#0b0e13;border:1px solid var(--border);border-radius:4px;">
+      <div style="display:flex;flex-direction:column;gap:4px;padding:8px 10px;background:#0b0e13;border:1px solid var(--border);border-radius:4px;">
         ${runs.map((r,i) => {
           const checked = selected.has(i) ? 'checked' : '';
-          const color = RUN_COLORS[i % RUN_COLORS.length];
-          return `<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap;">
+          const color = runColor(i);
+          return `<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap;">
             <input type="checkbox" ${checked} onchange="toggleRunIdx(${i})" style="accent-color:${color};">
+            <input type="color" value="${color}" onchange="setRunColor(${i}, this.value)" title="change color for this run"
+                   style="width:22px;height:16px;padding:0;border:1px solid var(--border);border-radius:2px;cursor:pointer;background:transparent;">
             <span style="color:${color};font-family:monospace;font-size:11px;">${esc(r.run_id)}</span>
             <span class="small" style="font-size:11px;">— ${esc(r.label)} (${r.iters_completed?.toLocaleString()||'?'} iters)</span>
           </label>`;
@@ -480,29 +514,58 @@ function renderLoss() {
   if (tb && tb['lm loss']) {
     const lm = tb['lm loss'];
     const lr = tb['learning-rate'] || [];
-    const traces = [{
-      x: lm.map(p => p[0]), y: lm.map(p => p[1]),
-      type: 'scatter', mode: 'lines', name: 'Megatron (ref lm loss)',
-      line: { color: '#79c0ff', width: 1.6 }, yaxis: 'y',
-    }];
 
-    // Overlay each selected nano run as its own trace.
+    // Build ref lookup {iter → loss} once so we can compute per-iter Δ quickly.
+    const refByIter = new Map();
+    for (const [it, v] of lm) refByIter.set(it, v);
+
+    const traces = [];
+    if (!SHOW_DIFF_MODE) {
+      // Raw loss: ref curve (always) + each selected nano run.
+      traces.push({
+        x: lm.map(p => p[0]), y: lm.map(p => p[1]),
+        type: 'scatter', mode: 'lines', name: 'Megatron (ref lm loss)',
+        line: { color: REF_COLOR, width: 1.6 }, yaxis: 'y',
+      });
+    } else {
+      // Δ mode: add a y=0 baseline so the zero line is obvious.
+      traces.push({
+        x: lm.map(p => p[0]), y: lm.map(() => 0),
+        type: 'scatter', mode: 'lines', name: 'ref baseline (Δ=0)',
+        line: { color: REF_COLOR, width: 1, dash: 'dash' }, yaxis: 'y',
+        hoverinfo: 'skip',
+      });
+    }
+
+    // Per-run traces.
     if (runs.length > 0) {
       for (const i of Array.from(selected).sort((a,b)=>a-b)) {
         const r = runs[i];
         if (!r) continue;
-        const color = RUN_COLORS[i % RUN_COLORS.length];
+        const color = runColor(i);
         const off = parseInt(r.iter_offset || 0);
         if (r.train_loss_points && r.train_loss_points.length) {
+          let x, y, namePrefix;
+          if (SHOW_DIFF_MODE) {
+            // Align nano iter N to ref iter (N+off); plot (nano − ref) where ref exists.
+            x = []; y = [];
+            for (const [it, v] of r.train_loss_points) {
+              const refIt = it + off;
+              if (refByIter.has(refIt)) { x.push(refIt); y.push(v - refByIter.get(refIt)); }
+            }
+            namePrefix = `Δ nano − ref · ${r.run_id}`;
+          } else {
+            x = r.train_loss_points.map(p => p[0] + off);
+            y = r.train_loss_points.map(p => p[1]);
+            namePrefix = `nano · ${r.run_id}` + (off ? ` (+${off})` : '');
+          }
           traces.push({
-            x: r.train_loss_points.map(p => p[0] + off),
-            y: r.train_loss_points.map(p => p[1]),
-            type: 'scatter', mode: 'lines',
-            name: `nano · ${r.run_id}` + (off ? ` (+${off})` : ''),
+            x, y, type: 'scatter', mode: 'lines',
+            name: namePrefix,
             line: { color, width: 1.2 }, yaxis: 'y',
           });
         }
-        if (r.val_loss_points && r.val_loss_points.length) {
+        if (r.val_loss_points && r.val_loss_points.length && !SHOW_DIFF_MODE) {
           traces.push({
             x: r.val_loss_points.map(p => p[0] + off),
             y: r.val_loss_points.map(p => p[1]),
@@ -523,7 +586,7 @@ function renderLoss() {
           line: { color: '#ff7b72', width: 1.2 }, yaxis: 'y',
         });
       }
-      if (nano && nano.val_loss && nano.val_loss.length) {
+      if (nano && nano.val_loss && nano.val_loss.length && !SHOW_DIFF_MODE) {
         traces.push({
           x: nano.val_loss.map(p => p[0]), y: nano.val_loss.map(p => p[1]),
           type: 'scatter', mode: 'lines+markers', name: `nano val (n=${nano.val_loss.length})`,
@@ -543,7 +606,11 @@ function renderLoss() {
       paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
       font: { color: '#e6edf3', size: 11 },
       xaxis: { title: 'step', gridcolor: '#30363d' },
-      yaxis: { title: 'lm loss', gridcolor: '#30363d' },
+      yaxis: {
+        title: SHOW_DIFF_MODE ? 'Δ lm loss (nano − ref)' : 'lm loss',
+        gridcolor: '#30363d',
+        zeroline: SHOW_DIFF_MODE, zerolinecolor: '#30363d', zerolinewidth: 1,
+      },
       yaxis2: { title: 'lr', overlaying: 'y', side: 'right',
                 gridcolor: 'transparent', color: '#d29922' },
       margin: { t: 20, l: 50, r: 60, b: 40 },
