@@ -1,0 +1,34 @@
+{
+  "experiment": "nano moediag 200-iter run from iter_7000 ckpt, new per-iter tokens_per_expert logging",
+  "run_id": "nano-196-moediag-20260423_012358",
+  "remote_log": "root@22.4.243.44:/root/nanogpt/out-cybertron-moe-196-moediag/train_log.jsonl",
+  "ref_log": "root@22.4.243.44:/prodcpfs/user/yuchen/scaling_exp/auto_test/scaling_moe_00196/logs/rank-0-1-scaling_moe_00196-run.log",
+  "ref_stats_json": "reference/ref_moe_routing_stats.json",
+  "overlap_iters": 201,
+  "maxvio_micro_batch": {
+    "nano_mean": 0.536,
+    "nano_median": 0.514,
+    "nano_p99": 0.897,
+    "ref_mean": 1.950,
+    "ref_median": 1.937,
+    "ref_p99": 2.267,
+    "ratio_nano_over_ref_mean": 0.275,
+    "ratio_nano_over_ref_median": 0.265
+  },
+  "loss_delta": {
+    "n": 201,
+    "mean_nano_minus_ref": 0.00541,
+    "stdev": 0.00155,
+    "note": "Matches the 7485-step full-retrain last-100-mean Δ = +0.00546 almost exactly."
+  },
+  "interpretation": [
+    "nano routes tokens 3.6x MORE UNIFORMLY than ref. ref's max expert gets ~3x its fair share of tokens; nano's max expert gets only ~1.5x.",
+    "ref and nano use mathematically identical aux-free bias correction: bias += sign(mean - counts) * 0.001 per optim step, with all-reduce across DP. Yet steady-state routing distribution is very different.",
+    "This is the most likely source of the stable +0.005 nat gap. Over-uniform routing reduces expert specialization; specialized experts produce lower loss on their preferred tokens.",
+    "Next step: determine whether nano's over-uniformity comes from (a) more effective bias accumulation path, (b) different topk tie-breaking in bf16, (c) scale-invariance differences in sign() updates when counts are aggregated differently."
+  ],
+  "repro": {
+    "launch": "OUT_DIR=out-cybertron-moe-196-moediag bash scripts/launch_196_from0_fresh.sh  (with config/cybertron_moe_196_moediag.py, max_iters=7200)",
+    "compare": "python3 /tmp/compare_moe_routing.py /tmp/nano_moediag_train_log.jsonl reference/ref_moe_routing_stats.json 8"
+  }
+}
