@@ -355,6 +355,20 @@ class MoERouter(nn.Module):
         # update_expert_bias() after the accumulation loop completes.
         self.register_buffer('local_tokens_per_expert',
                              torch.zeros(num_experts, dtype=torch.float32))
+        # Per-forward diagnostic stats captured for logging. Refreshed each forward.
+        # Not a parameter; training.py reads these between microbatches and aggregates.
+        # Fields: score_mean, score_std, topk_margin_p5, topk_margin_median
+        self._last_score_mean = 0.0
+        self._last_score_std = 0.0
+        self._last_topk_margin_p5 = 0.0
+        self._last_topk_margin_median = 0.0
+        # Per-microbatch routing stats: we snapshot counts at each forward so
+        # train.py can compute per-mb max/min/mean without needing to diff the
+        # accumulator. Updated from local counts delta after the scatter_add below.
+        self.register_buffer('_last_mb_counts',
+                             torch.zeros(num_experts, dtype=torch.float32),
+                             persistent=False)
+        self._prev_total = 0.0  # scalar tracking total count before this fwd
 
     def forward(self, x):  # x: [S, n_embd]
         S = x.shape[0]
@@ -404,10 +418,24 @@ class MoERouter(nn.Module):
                 # Megatron's _maintain_float32_expert_bias pattern).
                 if self.local_tokens_per_expert.dtype != torch.float32:
                     self.local_tokens_per_expert.data = self.local_tokens_per_expert.data.float()
+                # Snapshot counts BEFORE this forward's scatter so train.py can see
+                # per-microbatch counts (_last_mb_counts = after - before).
+                pre = self.local_tokens_per_expert.clone()
                 self.local_tokens_per_expert.scatter_add_(
                     0, topk_idx.reshape(-1),
                     torch.ones(S * K, dtype=torch.float32, device=x.device)
                 )
+                self._last_mb_counts.copy_(self.local_tokens_per_expert - pre)
+                # Additional diagnostics (fp32, cheap): score distribution stats
+                # and topk margin. These are populated on every forward; train.py
+                # aggregates over microbatches at log time.
+                _sc = scores.detach()
+                self._last_score_mean = float(_sc.mean().item())
+                self._last_score_std  = float(_sc.std().item())
+                _sorted, _ = scores_biased.detach().sort(dim=-1, descending=True)
+                _margin = (_sorted[:, K-1] - _sorted[:, K]).abs()
+                self._last_topk_margin_p5 = float(_margin.quantile(0.05).item())
+                self._last_topk_margin_median = float(_margin.median().item())
 
         # Return also raw sigmoid scores (pre-bias, pre-group-mask) for seq_aux balance loss
         return topk_idx, final_weights, scores  # [S, K], [S, K], [S, E]

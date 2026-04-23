@@ -613,6 +613,12 @@ while True:
     # unchanged; only the reporting scope is different.
     _acc_loss_sum = 0.0      # local sum of per-mb LM CE (for reporting)
     _acc_aux_sum = 0.0       # local sum of per-mb alpha*aux_contrib (diagnostic)
+    # Per-microbatch per-layer router stats, captured after each forward and
+    # accumulated for logging. Each dict maps layer index → list of per-mb
+    # metric values across the grad_accum microbatches.
+    _mb_router = {}   # layer_idx -> dict of lists
+    from model import MoERouter as _MoERouter_t
+    _moe_routers = [m for m in raw_model.modules() if isinstance(m, _MoERouter_t)]
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
@@ -628,6 +634,29 @@ while True:
                 _acc_aux_sum += _aux.float().item()
             else:
                 _acc_loss_sum += loss.detach().float().item()
+            # Capture per-MB per-layer stats from each MoERouter's _last_mb_counts
+            # and score-distribution fields (populated by MoERouter.forward).
+            for _li, _r in enumerate(_moe_routers):
+                c = _r._last_mb_counts.float()
+                mean_c = float(c.mean().item())
+                max_c = float(c.max().item())
+                min_c = float(c.min().item())
+                dead = int((c == 0).sum().item())
+                # Normalized load entropy (1 = uniform; 0 = fully collapsed)
+                p = c / (c.sum() + 1e-20)
+                import math
+                _entropy = float((-p[p > 0] * p[p > 0].log()).sum().item())
+                _ent_norm = _entropy / math.log(c.numel())
+                d = _mb_router.setdefault(_li, {
+                    'max': [], 'min': [], 'mean': [], 'dead': [], 'ent': [],
+                    'sc_mean': [], 'sc_std': [], 'mg_p5': [], 'mg_med': [],
+                })
+                d['max'].append(max_c); d['min'].append(min_c); d['mean'].append(mean_c)
+                d['dead'].append(dead); d['ent'].append(_ent_norm)
+                d['sc_mean'].append(_r._last_score_mean)
+                d['sc_std'].append(_r._last_score_std)
+                d['mg_p5'].append(_r._last_topk_margin_p5)
+                d['mg_med'].append(_r._last_topk_margin_median)
             loss = loss / gradient_accumulation_steps
         X, Y = _get_batch('train')
         scaler.scale(loss).backward()
@@ -724,6 +753,36 @@ while True:
                 if gradient_accumulation_steps > 0 and _acc_aux_sum != 0:
                     _entry['aux_contrib_mean'] = (
                         _acc_aux_sum / gradient_accumulation_steps)
+                # Per-layer router diagnostic stats (new). Each metric is the
+                # mean across microbatches within this step. 8 layers, each with:
+                # max/min/mean/dead/ent_norm, plus score and topk-margin stats.
+                if _mb_router:
+                    import statistics as _stat
+                    def _m(v): return float(sum(v) / len(v)) if v else 0.0
+                    per_layer = []
+                    for _li in sorted(_mb_router.keys()):
+                        d = _mb_router[_li]
+                        per_layer.append({
+                            'L': _li + 1,  # MoE layer index 1..8
+                            'max':  _m(d['max']),
+                            'min':  _m(d['min']),
+                            'mean': _m(d['mean']),
+                            'dead': _m(d['dead']),
+                            'ent':  _m(d['ent']),
+                            'sc_mean': _m(d['sc_mean']),
+                            'sc_std':  _m(d['sc_std']),
+                            'mg_p5':  _m(d['mg_p5']),
+                            'mg_med': _m(d['mg_med']),
+                        })
+                    _entry['moe_per_layer'] = per_layer
+                    # Also aggregate across layers (mean)
+                    _agg = {k: sum(r[k] for r in per_layer) / len(per_layer)
+                            for k in ['max', 'min', 'mean', 'dead', 'ent',
+                                      'sc_mean', 'sc_std', 'mg_p5', 'mg_med']}
+                    _entry['moe_dead_layermean'] = _agg['dead']
+                    _entry['moe_entropy_layermean'] = _agg['ent']
+                    _entry['moe_score_std_layermean'] = _agg['sc_std']
+                    _entry['moe_topk_margin_p5_layermean'] = _agg['mg_p5']
                 with open(_log_path, 'a') as _f:
                     _f.write(_json.dumps(_entry) + '\n')
             except Exception:
