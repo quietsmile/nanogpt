@@ -616,9 +616,15 @@ while True:
     # Per-microbatch per-layer router stats, captured after each forward and
     # accumulated for logging. Each dict maps layer index → list of per-mb
     # metric values across the grad_accum microbatches.
-    _mb_router = {}   # layer_idx -> dict of lists
+    _mb_router = {}   # layer_idx -> dict of lists (per-mb=1 stats)
     from model import MoERouter as _MoERouter_t
     _moe_routers = [m for m in raw_model.modules() if isinstance(m, _MoERouter_t)]
+    # Running raw-count buffers for synthetic-mb=4 stats — aggregate 4 consecutive
+    # mb=1 forwards' counts into one "logical mb=4" microbatch, matching ref's
+    # mb=4 granularity so maxvio is apples-to-apples with ref master log.
+    _REF_MB_SIZE = 4
+    _syn_buf = [None] * len(_moe_routers)   # accumulator [E] per layer
+    _syn_stats = {}  # layer_idx -> dict with per-syn-mb lists
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
@@ -635,13 +641,17 @@ while True:
             else:
                 _acc_loss_sum += loss.detach().float().item()
             # Capture per-MB per-layer stats from each MoERouter's _last_mb_counts
-            # and score-distribution fields (populated by MoERouter.forward).
+            # (single microbatch = single forward, counts BEFORE DP all-reduce —
+            # matches ref's apples-to-apples scope: one rank, one microbatch).
             for _li, _r in enumerate(_moe_routers):
                 c = _r._last_mb_counts.float()
                 mean_c = float(c.mean().item())
                 max_c = float(c.max().item())
                 min_c = float(c.min().item())
                 dead = int((c == 0).sum().item())
+                # Per-mb maxvio, computed EXACTLY as cybertron modules_deepseekv2:547
+                # maxvio_micro = (tokens_per_expert.max() - mean) / mean
+                maxvio_micro = (max_c - mean_c) / mean_c if mean_c > 0 else 0.0
                 # Normalized load entropy (1 = uniform; 0 = fully collapsed)
                 p = c / (c.sum() + 1e-20)
                 import math
@@ -650,13 +660,32 @@ while True:
                 d = _mb_router.setdefault(_li, {
                     'max': [], 'min': [], 'mean': [], 'dead': [], 'ent': [],
                     'sc_mean': [], 'sc_std': [], 'mg_p5': [], 'mg_med': [],
+                    'maxvio_micro': [],
                 })
                 d['max'].append(max_c); d['min'].append(min_c); d['mean'].append(mean_c)
                 d['dead'].append(dead); d['ent'].append(_ent_norm)
+                d['maxvio_micro'].append(maxvio_micro)
                 d['sc_mean'].append(_r._last_score_mean)
                 d['sc_std'].append(_r._last_score_std)
                 d['mg_p5'].append(_r._last_topk_margin_p5)
                 d['mg_med'].append(_r._last_topk_margin_median)
+                # Synthetic mb=4: accumulate this layer's per-mb=1 counts. Emit
+                # a per-syn-mb maxvio every _REF_MB_SIZE forwards. Matches ref's
+                # mb=4 granularity so the metric is apples-to-apples.
+                if _syn_buf[_li] is None:
+                    _syn_buf[_li] = _r._last_mb_counts.float().clone()
+                else:
+                    _syn_buf[_li] += _r._last_mb_counts.float()
+                if (micro_step + 1) % _REF_MB_SIZE == 0:
+                    syn_c = _syn_buf[_li] / _REF_MB_SIZE  # per-sample normalize
+                    syn_mean = float(syn_c.mean().item())
+                    syn_max = float(syn_c.max().item())
+                    syn_maxvio = (syn_max - syn_mean) / syn_mean if syn_mean > 0 else 0.0
+                    sd = _syn_stats.setdefault(_li, {'max': [], 'mean': [], 'maxvio': []})
+                    sd['max'].append(syn_max)
+                    sd['mean'].append(syn_mean)
+                    sd['maxvio'].append(syn_maxvio)
+                    _syn_buf[_li] = None
             loss = loss / gradient_accumulation_steps
         X, Y = _get_batch('train')
         scaler.scale(loss).backward()
@@ -783,6 +812,16 @@ while True:
                     _entry['moe_entropy_layermean'] = _agg['ent']
                     _entry['moe_score_std_layermean'] = _agg['sc_std']
                     _entry['moe_topk_margin_p5_layermean'] = _agg['mg_p5']
+                # Synthetic-mb=4 maxvio (apples-to-apples with ref's mb=4
+                # master log). Emitted as mean across (syn-mbs × layers).
+                if _syn_stats:
+                    syn_maxvios = [v for sd in _syn_stats.values() for v in sd['maxvio']]
+                    syn_maxes = [v for sd in _syn_stats.values() for v in sd['max']]
+                    syn_means = [v for sd in _syn_stats.values() for v in sd['mean']]
+                    if syn_maxvios:
+                        _entry['maxvio_mb4_apples'] = sum(syn_maxvios) / len(syn_maxvios)
+                        _entry['tok_max_mb4_apples'] = sum(syn_maxes) / len(syn_maxes)
+                        _entry['tok_mean_mb4_apples'] = sum(syn_means) / len(syn_means)
                 with open(_log_path, 'a') as _f:
                     _f.write(_json.dumps(_entry) + '\n')
             except Exception:

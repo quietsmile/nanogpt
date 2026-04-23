@@ -224,12 +224,17 @@ def refresh_one(run_meta, ref):
     routing_pairs = []
     for i in sorted(keeps):
         d = nano[i]
-        if 'tokens_per_expert_max' in d:
-            # Prefer per-layer stats if present (moe_per_layer added in cd7f27b)
-            pl = d.get('moe_per_layer')
-            if pl:
-                # Per-layer maxvio = (per-layer-avg-max - per-layer-avg-mean) / mean
-                # Average across layers — matches ref's master-log aggregation.
+        if 'tokens_per_expert_max' in d or 'maxvio_mb4_apples' in d:
+            # Priority 1: apples-to-apples synthetic mb=4 maxvio (matches ref's
+            # mb=4 granularity exactly). Available in runs trained after this fix.
+            if 'maxvio_mb4_apples' in d:
+                mv = float(d['maxvio_mb4_apples'])
+                mx = float(d.get('tok_max_mb4_apples', 0.0))
+                me = float(d.get('tok_mean_mb4_apples', 0.0))
+                mn = 0.0  # not emitted (rarely used)
+            # Priority 2: per-layer stats (pre-synthetic-mb fix).
+            elif d.get('moe_per_layer'):
+                pl = d['moe_per_layer']
                 layer_vios = [((L['max'] - L['mean']) / L['mean']) if L['mean'] > 0 else 0
                               for L in pl]
                 mv = sum(layer_vios) / len(layer_vios) if layer_vios else 0.0
@@ -237,8 +242,7 @@ def refresh_one(run_meta, ref):
                 mn = sum(L['min'] for L in pl) / len(pl)
                 me = sum(L['mean'] for L in pl) / len(pl)
             else:
-                # Fallback: the old misaligned formula (kept for older runs
-                # without moe_per_layer).
+                # Fallback: the old misaligned formula.
                 mv = float(d.get('maxvio_micro_batch', 0.0))
                 mx = float(d.get('tokens_per_expert_max', 0.0)) / _dp
                 mn = float(d.get('tokens_per_expert_min', 0.0)) / _dp
