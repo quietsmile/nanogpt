@@ -19,6 +19,89 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 
+class ChunkedLinearCrossEntropy(torch.autograd.Function):
+    """Memory-efficient fused linear + cross-entropy.
+
+    At mb=4, the full logits tensor [mb*T, V] = [32768, 152064] fp32 is 20 GB;
+    forward + backward doubles that. Chunking iterates over rows of the hidden
+    tensor, computing logits + loss + backward grads per-chunk, then freeing
+    intermediates. Peak extra memory = ~(3 × chunk × V × 4 bytes) ≈ 3.7 GB at
+    chunk=2048, instead of 40 GB.
+
+    Returns per-token mean loss over non-ignored positions (reduction='mean',
+    ignore_index=-1) — mathematically identical to
+    F.cross_entropy(x @ W.T, targets, ignore_index=-1) with reduction='mean'.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, targets, chunk_size=2048, ignore_index=-1):
+        # x: [N, C] (caller should pass fp32 for accuracy; we don't cast)
+        # weight: [V, C] fp32
+        # targets: [N] long, with `ignore_index` for masked positions
+        assert x.dtype == torch.float32 and weight.dtype == torch.float32, \
+            f"ChunkedLinearCrossEntropy expects fp32 inputs; got {x.dtype}/{weight.dtype}"
+        assert x.dim() == 2 and weight.dim() == 2 and x.shape[1] == weight.shape[1]
+        N, C = x.shape
+        V = weight.shape[0]
+
+        total_loss = torch.zeros((), device=x.device, dtype=torch.float32)
+        total_tokens = torch.zeros((), device=x.device, dtype=torch.float32)
+        grad_x = torch.zeros_like(x)
+        grad_W = torch.zeros_like(weight)
+
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            x_chunk = x[start:end]          # [chunk, C] fp32
+            y_chunk = targets[start:end]    # [chunk] long
+            mask = (y_chunk != ignore_index)  # [chunk] bool
+
+            logits = x_chunk @ weight.T      # [chunk, V] fp32
+            log_probs = F.log_softmax(logits, dim=-1)
+            del logits
+            safe_y = y_chunk.clamp(min=0)
+            nll = -log_probs.gather(1, safe_y.unsqueeze(1)).squeeze(1)
+            nll = torch.where(mask, nll, torch.zeros_like(nll))
+            total_loss = total_loss + nll.sum()
+            total_tokens = total_tokens + mask.float().sum()
+
+            # Backward gradients: d(nll_sum)/d(logits) = softmax - onehot at valid rows.
+            softmax = log_probs.exp()
+            del log_probs
+            one_hot = torch.zeros_like(softmax)
+            one_hot.scatter_(1, safe_y.unsqueeze(1), 1.0)
+            dlogits = softmax - one_hot
+            del softmax, one_hot
+            dlogits = dlogits * mask.float().unsqueeze(1)
+
+            # Accumulate gradients (unscaled — divide by total_tokens after the loop)
+            grad_x[start:end] = dlogits @ weight
+            grad_W.addmm_(dlogits.T, x_chunk)
+            del dlogits
+
+        mean_loss = total_loss / total_tokens
+        grad_x.div_(total_tokens)
+        grad_W.div_(total_tokens)
+
+        ctx.save_for_backward(grad_x, grad_W)
+        return mean_loss
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        grad_x, grad_W = ctx.saved_tensors
+        return grad_x * grad_out, grad_W * grad_out, None, None, None
+
+
+def linear_cross_entropy(x, weight, targets, chunk_size=2048, ignore_index=-1,
+                         use_chunked=True):
+    """Convenience wrapper. When chunking is disabled, falls back to standard
+    F.linear + F.cross_entropy for numerical parity testing.
+    """
+    if use_chunked:
+        return ChunkedLinearCrossEntropy.apply(x, weight, targets, chunk_size, ignore_index)
+    logits = F.linear(x, weight)
+    return F.cross_entropy(logits, targets, ignore_index=ignore_index)
+
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -525,9 +608,18 @@ class MoEFFN(nn.Module):
         K = self.topk
         E = self.num_experts
 
-        # Optional TE fused path — matches cybertron's moe_permute_fusion=True exactly.
+        # TE fused path (default on CUDA). Uses te.moe_permute_with_probs +
+        # te.GroupedLinear, which avoids the bucket-padding approach below —
+        # peak activation memory drops ~27 GB at mb=1 for the 9L/144-expert
+        # config (see /tmp/mem_profile.py). TE requires CUDA tensors; the
+        # bucket-padding fallback runs on CPU (used by unit tests) and when
+        # NANO_TE_MOE=0 is set (for numerics debugging).
         import os as _os
-        if _os.environ.get('NANO_TE_MOE', '0') == '1':
+        _use_te_moe = (
+            _os.environ.get('NANO_TE_MOE', '1') == '1'
+            and x.is_cuda
+        )
+        if _use_te_moe:
             import transformer_engine.pytorch as _te
             # Build routing_map [S, E] int32 and probs [S, E] fp32
             routing_map = torch.zeros(S, E, dtype=torch.int32, device=x.device)
@@ -572,10 +664,18 @@ class MoEFFN(nn.Module):
             )
             # Fp32 sum then cast (matches nano's non-TE path)
             out = (shared_out.float() + routed_out.float()).to(x_flat.dtype).view(B, T, C)
-            # Return per Block.forward expectation: (out, aux)
+            # Sequence-wise balance aux loss — same formula as the bucket-path
+            # branch below (modules_deepseekv2.py:374-378). Must also run on the
+            # TE path so training sees the aux gradient.
             if self.training and self.seq_aux_alpha > 0:
-                # Skip aux for now when using TE path (only affects training)
-                aux = x.new_zeros(())
+                topk_b = topk_idx.view(B, T, K)
+                counts_bE = torch.zeros(B, E, device=x.device, dtype=torch.float32)
+                src = torch.ones_like(topk_b, dtype=torch.float32)
+                counts_bE.scatter_add_(1, topk_b.reshape(B, T * K), src.reshape(B, T * K))
+                fii = counts_bE * (float(E) / (float(T) * float(K)))
+                pi = raw_scores.view(B, T, E).float()
+                pii = (pi / (pi.sum(dim=-1, keepdim=True) + 1e-20)).mean(dim=1)
+                aux = (fii * pii).sum(dim=1).mean()
             else:
                 aux = x.new_zeros(())
             return out, aux
@@ -733,6 +833,10 @@ class GPTConfig:
     moe_router_score_correction_coeff: float = 0.001  # bias update step (aux-free load balance)
     moe_shared_expert_hidden_size: Optional[int] = None  # None = no shared expert
     moe_routing_type: str = 'group_limited_greedy'  # or 'greedy' (flat top-K over all experts)
+    expert_model_parallel_size: int = 1  # EP: each rank holds num_experts/ep_size experts and
+                                         # all-to-alls tokens to the owning rank. Matches
+                                         # Megatron's expert_model_parallel_size. Must divide
+                                         # num_experts and world_size.
 
     # --- Cybertron loss/attention extras (needed for scaling_moe_00196 alignment) ---
     eod_token_id: Optional[int] = None     # if set, loss at positions where target == this id is masked
@@ -743,6 +847,10 @@ class GPTConfig:
     fp32_residual: bool = False            # keep residual stream in fp32; each block casts sublayer outputs
                                            # to fp32 before x + sublayer(x). Costs ~2x activation memory but
                                            # removes bf16 ULP noise per block that compounds over L layers × N steps.
+    chunked_ce: bool = True                # use ChunkedLinearCrossEntropy for lm_head+CE on CUDA training
+                                           # forward. Avoids materializing the full [S, V] logits tensor
+                                           # (20 GB at mb=4, V=152064). Set False to debug numerics against
+                                           # the standard F.linear + F.cross_entropy path.
 
     def __post_init__(self):
         if self.use_swiglu and self.ffn_hidden_size is None:
@@ -877,16 +985,9 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            # Force lm_head in fp32. Ref `fp16_lm_cross_entropy: false` implies logits
-            # should not be bf16 (bf16 has ~3 decimal digits precision on 152064-dim softmax).
-            with torch.amp.autocast('cuda', enabled=False):
-                logits = F.linear(x.float(), self.lm_head.weight.float())
+            # Build masked targets first (same logic as before — mask EOD /
+            # mask_loss_id on INPUT positions to match ref loss_mask semantics).
             t_flat = targets.view(-1)
-            # Mask positions where the INPUT token is EOD or mask_loss_id (matches
-            # Megatron's `loss_mask[data == eod_token] = 0` semantics — mask is
-            # keyed on INPUT at position i, NOT target. Previously nano masked
-            # where target[i] == EOD, which is off-by-one (masks position before EOD
-            # instead of EOD position itself). Fix: use idx (input) for masking.
             mask_ids = []
             if getattr(self.config, 'eod_token_id', None) is not None:
                 mask_ids.append(self.config.eod_token_id)
@@ -898,7 +999,25 @@ class GPT(nn.Module):
                 for mid in mask_ids:
                     mask = mask | (idx_flat == mid)
                 t_flat = torch.where(mask, torch.full_like(t_flat, -1), t_flat)
-            lm_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), t_flat, ignore_index=-1)
+
+            # Force lm_head compute in fp32 (matches ref fp16_lm_cross_entropy=false).
+            # Use chunked linear+CE to avoid materializing the full [S, V] logits
+            # tensor — 20 GB at mb=4 × seq=8192 × V=152064, otherwise backward
+            # OOMs on 80 GB H100. `logits` is only computed for the separate
+            # eval-time / sanity path below.
+            _USE_CHUNKED_CE = getattr(self.config, 'chunked_ce', True)
+            if _USE_CHUNKED_CE and targets.is_cuda:
+                # Hidden fp32 copy (shape [S, C]) is small: mb=4 × seq=8192 × 512 × 4 = 0.5 GB
+                x_fp32 = x.float().view(-1, x.shape[-1]).contiguous()
+                W_fp32 = self.lm_head.weight.float()
+                lm_loss = ChunkedLinearCrossEntropy.apply(
+                    x_fp32, W_fp32, t_flat, 2048, -1)
+                logits = None  # not materialized in chunked path
+            else:
+                with torch.amp.autocast('cuda', enabled=False):
+                    logits = F.linear(x.float(), self.lm_head.weight.float())
+                lm_loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), t_flat, ignore_index=-1)
             # Sequence-wise MoE balance aux: stored as a tensor component of loss
             # (for backward) but kept separable so callers can log LM CE alone —
             # matches Megatron, which reports pure `lm loss` and routes aux through
