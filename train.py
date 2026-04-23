@@ -614,10 +614,34 @@ while True:
         X, Y = _get_batch('train')
         scaler.scale(loss).backward()
 
+    # Capture per-iter MoE routing stats BEFORE update_expert_bias resets the
+    # counter. Aggregates across layers: per-expert token counts averaged over
+    # microbatches, then take global max/min/mean + maxVio = (max - mean)/mean.
+    # Matches ref master log columns `tokens_per_expert/{max,min,mean}` and
+    # `maxVio/{micro_batch,global_batch}`.
+    from model import MoERouter
+    _moe_counts = []  # one tensor [E] per MoE layer (fp32, local-rank counts)
+    for _m in raw_model.modules():
+        if isinstance(_m, MoERouter):
+            _moe_counts.append(_m.local_tokens_per_expert.detach().clone().float())
+    if _moe_counts:
+        import torch.distributed as _dist
+        _stacked = torch.stack(_moe_counts, dim=0)  # [L_moe, E]
+        if ddp:
+            _dist.all_reduce(_stacked, op=_dist.ReduceOp.SUM)
+        # Per-microbatch scale: divide by gradient_accumulation_steps for a
+        # per-mb average (ref's tokens_per_expert/mean is per-mb).
+        _per_mb = _stacked / max(gradient_accumulation_steps, 1)
+        _moe_max = float(_per_mb.max().item())
+        _moe_min = float(_per_mb.min().item())
+        _moe_mean = float(_per_mb.mean().item())
+        _moe_maxvio = (_moe_max - _moe_mean) / _moe_mean if _moe_mean > 0 else 0.0
+    else:
+        _moe_max = _moe_min = _moe_mean = _moe_maxvio = None
+
     # Aux-free MoE bias: apply one sign() update per optim step using the token
     # counts accumulated over the grad_accum micro-steps (matches Megatron's
     # _update_router_expert_bias in finalize_model_grads.py).
-    from model import MoERouter
     for _m in raw_model.modules():
         if isinstance(_m, MoERouter):
             _m.update_expert_bias()
@@ -664,13 +688,26 @@ while True:
             import json as _json
             _log_path = os.path.join(out_dir, 'train_log.jsonl')
             try:
+                _entry = {
+                    'iter': iter_num, 'loss': float(lossf),
+                    'samples': int(consumed_samples),
+                    'dt_ms': float(dt*1000), 'mfu': float(running_mfu),
+                    'lr': float(lr), 'grad_norm': _gn,
+                }
+                # MoE routing stats captured pre-update_expert_bias (see above).
+                # Comparable to ref master log: tokens_per_expert/{max,min,mean}
+                # and maxVio/micro_batch.
+                if _moe_max is not None:
+                    _entry['tokens_per_expert_max'] = _moe_max
+                    _entry['tokens_per_expert_min'] = _moe_min
+                    _entry['tokens_per_expert_mean'] = _moe_mean
+                    _entry['maxvio_micro_batch'] = _moe_maxvio
+                # Aux contribution (diagnostic — not added to 'loss' above).
+                if gradient_accumulation_steps > 0 and _acc_aux_sum != 0:
+                    _entry['aux_contrib_mean'] = (
+                        _acc_aux_sum / gradient_accumulation_steps)
                 with open(_log_path, 'a') as _f:
-                    _f.write(_json.dumps({
-                        'iter': iter_num, 'loss': float(lossf),
-                        'samples': int(consumed_samples),
-                        'dt_ms': float(dt*1000), 'mfu': float(running_mfu),
-                        'lr': float(lr), 'grad_norm': _gn,
-                    }) + '\n')
+                    _f.write(_json.dumps(_entry) + '\n')
             except Exception:
                 pass
     iter_num += 1
