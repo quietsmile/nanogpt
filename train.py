@@ -404,10 +404,15 @@ if compile:
     model = torch.compile(model)
 
 if ddp:
-    # find_unused_parameters=False: all experts get touched through grouped_mm ops
-    # (weights multiplied by 0 routing prob still flow through graph). Setting to True
-    # hurts MFU ~40% with no benefit on this MoE impl.
-    model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=False)
+    # find_unused_parameters: when NANO_TE_MOE=1 (default), the stacked
+    # gate_weight/up_weight/down_weight parameters are registered on the module
+    # but not touched by the forward (TE GroupedLinear holds a copy it uses
+    # instead). Setting True lets DDP skip sync'ing these unused params.
+    # For the bucket-padding fallback path, all experts are touched through
+    # grouped_mm, so False would also work there — but True is safe either way.
+    _find_unused = os.environ.get('NANO_TE_MOE', '1') == '1'
+    model = DDP(model, device_ids=[ddp_local_rank],
+                find_unused_parameters=_find_unused)
 
 # -----------------------------------------------------------------------------
 # LR scheduling
