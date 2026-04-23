@@ -588,14 +588,28 @@ while True:
     if iter_num == 0 and eval_only:
         break
 
-    # Forward / backward with gradient accumulation
-    _acc_loss_sum = 0.0  # local sum of micro-batch losses for global logging
+    # Forward / backward with gradient accumulation. We log LM cross-entropy
+    # only — not the (CE + alpha*aux) combined value the model returns — so
+    # the logged value matches Megatron's TB `lm loss` scalar. aux still flows
+    # through backward via the combined loss, so the training signal is
+    # unchanged; only the reporting scope is different.
+    _acc_loss_sum = 0.0      # local sum of per-mb LM CE (for reporting)
+    _acc_aux_sum = 0.0       # local sum of per-mb alpha*aux_contrib (diagnostic)
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
-            _acc_loss_sum += loss.detach().float().item()
+            # Prefer the exposed lm/aux split (set by GPT.forward on the raw
+            # model). Fall back to the combined loss for older checkpoints /
+            # non-aux configs. raw_model handles the DDP unwrap.
+            _lm = getattr(raw_model, 'last_lm_loss', None)
+            _aux = getattr(raw_model, 'last_aux_contrib', None)
+            if _lm is not None and _aux is not None:
+                _acc_loss_sum += _lm.float().item()
+                _acc_aux_sum += _aux.float().item()
+            else:
+                _acc_loss_sum += loss.detach().float().item()
             loss = loss / gradient_accumulation_steps
         X, Y = _get_batch('train')
         scaler.scale(loss).backward()

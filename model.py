@@ -870,11 +870,21 @@ class GPT(nn.Module):
                 for mid in mask_ids:
                     mask = mask | (idx_flat == mid)
                 t_flat = torch.where(mask, torch.full_like(t_flat, -1), t_flat)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), t_flat, ignore_index=-1)
-            # Add sequence-wise MoE balance aux
+            lm_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), t_flat, ignore_index=-1)
+            # Sequence-wise MoE balance aux: stored as a tensor component of loss
+            # (for backward) but kept separable so callers can log LM CE alone —
+            # matches Megatron, which reports pure `lm loss` and routes aux through
+            # MoEAuxLossAutoScaler independently.
             alpha = getattr(self.config, 'seq_aux_balance_alpha', 0.0) or 0.0
             if alpha > 0 and n_moe_layers > 0:
-                loss = loss + alpha * (aux_sum / n_moe_layers)
+                aux_contrib = alpha * (aux_sum / n_moe_layers)
+            else:
+                aux_contrib = lm_loss.new_zeros(())
+            loss = lm_loss + aux_contrib
+            # Expose components on the module for training-loop logging. train.py
+            # can subtract aux to log apples-to-apples with ref's TB `lm loss`.
+            self.last_lm_loss = lm_loss.detach()
+            self.last_aux_contrib = aux_contrib.detach()
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None
