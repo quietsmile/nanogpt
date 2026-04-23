@@ -46,5 +46,13 @@
     "has_biasfix": true,
     "started_at": "2026-04-22 00:00:00 +0800",
     "file": "runs/nano-196-v10final-20260422.json"
+  },
+  {
+    "run_id": "nano-196-moediag-20260423",
+    "label": "v10 moediag \u00b7 200\u6b65\uff08iter 7000\u21927200, MoE routing stats logged\uff09",
+    "iters_completed": 7200,
+    "has_biasfix": true,
+    "started_at": "2026-04-23 01:24:00 +0800",
+    "file": "runs/nano-196-moediag-20260423.json"
   }
 ]

@@ -89,6 +89,13 @@ beta1 = 0.9
 beta2 = 0.95
 adam_eps = 1e-8       # cybertron uses 1e-15
 grad_clip = 1.0
+# Muon (NorMuon + Polar Express). When use_muon=True, attention/MLP 2D weights
+# and MoE 3D expert weights are routed to Muon; embeddings/router/norms stay on AdamW.
+use_muon = False
+muon_lr = None        # if None, defaults to learning_rate * 33 (typical Muon scale)
+muon_momentum = 0.95
+muon_beta2 = 0.95
+muon_weight_decay = None  # if None, uses weight_decay
 # learning rate decay settings
 decay_lr = True
 lr_decay_style = 'cosine'  # 'cosine' | 'wsd-exp'
@@ -369,14 +376,25 @@ model.to(device)
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # Optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), adam_eps, device_type)
+optimizer = model.configure_optimizers(
+    weight_decay, learning_rate, (beta1, beta2), adam_eps, device_type,
+    use_muon=use_muon, muon_lr=muon_lr, muon_momentum=muon_momentum,
+    muon_beta2=muon_beta2, muon_weight_decay=muon_weight_decay,
+)
+# Tag each param_group with lr_mult so the LR schedule can scale heterogeneous groups
+# by a single base. AdamW groups default to 1.0; Muon group multiplies by its base/AdamW
+# base ratio so the WSD-exp / cosine schedule shape is shared across both.
+for pg in optimizer.param_groups:
+    if 'lr_mult' not in pg:
+        pg['lr_mult'] = pg['lr'] / learning_rate if learning_rate > 0 else 1.0
 if init_from == 'resume':
     _opt_state = checkpoint.get('optimizer')
-    if _opt_state and 'param_groups' in _opt_state:
+    _has_state = bool(_opt_state) and ('param_groups' in _opt_state or _opt_state.get('_multi'))
+    if _has_state:
         optimizer.load_state_dict(_opt_state)
     else:
         if master_process:
-            print('resume: optimizer state empty/absent; using fresh AdamW state')
+            print('resume: optimizer state empty/absent; using fresh state')
 checkpoint = None
 
 # Compile
@@ -514,7 +532,7 @@ while True:
     # Set LR for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+        param_group['lr'] = lr * param_group.get('lr_mult', 1.0)
 
     # Evaluate and checkpoint
     # All DDP ranks must participate in estimate_loss() since it contains dist.all_reduce.

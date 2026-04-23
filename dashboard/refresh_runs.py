@@ -88,6 +88,19 @@ RUNS = [
         'iter_offset': 1,
         'notes': 'v10 FINAL：fused_apply_rotary_pos_emb (95% drift 源) + te.GroupedLinear + fp32 SwiGLU/MoE/silu + 输入端 EOD mask + NCCL strict determinism。last-100-mean nano=2.8539 / ref=2.8493 / Δ=+0.0047 nat（1/10 step stdev）。Δ 在 ±0.15 nat 震荡并收敛到 ULP。Val loss Δ=+0.023 nat。',
     },
+    {
+        'run_id': 'nano-196-moediag-20260423',
+        'label': 'v10 moediag · 200步（iter 7000→7200, MoE routing stats logged）',
+        'has_biasfix': True,
+        'host': 'root@22.4.243.44',
+        'remote_jsonl': '/root/nanogpt/out-cybertron-moe-196-moediag/train_log.jsonl',
+        'remote_log': '/root/nanogpt/logs/moediag.log',
+        'config': 'config/cybertron_moe_196_moediag.py',
+        'started_at': '2026-04-23 01:24:00 +0800',
+        'init_from': 'resume (v10-fresh iter_7000 ckpt)',
+        'iter_offset': 1,
+        'notes': '短跑，主要为了收集 per-iter MoE 路由 stats (maxvio, tok_per_expert)。 maxvio mean 0.54 vs ref 1.95 — nano routing 3.6× 更均衡。Loss Δ = +0.00541 (201 iter avg), 跟完整 7485 步 +0.00546 几乎 bitwise 吻合。',
+    },
 ]
 
 
@@ -182,6 +195,23 @@ def refresh_one(run_meta, ref):
         'final_iter_diff': (nano[max_iter]['loss'] - ref[max_iter + offset]) if (max_iter + offset) in ref else None,
     }
 
+    # Routing stats (only present for runs trained after d782fc3 added the
+    # per-iter tokens_per_expert logging). Scale correction: nano's
+    # `tokens_per_expert_max/min/mean` are "total count across DP-world /
+    # grad_accum" — to match ref's per-microbatch scale we divide by DP size.
+    _dp = 8  # nano's DP world size (all runs here)
+    routing_pairs = []
+    for i in sorted(keeps):
+        d = nano[i]
+        if 'tokens_per_expert_max' in d:
+            routing_pairs.append([
+                i,
+                float(d.get('maxvio_micro_batch', 0.0)),
+                float(d.get('tokens_per_expert_max', 0.0)) / _dp,
+                float(d.get('tokens_per_expert_min', 0.0)) / _dp,
+                float(d.get('tokens_per_expert_mean', 0.0)) / _dp,
+            ])
+
     run = dict(run_meta)
     run.pop('remote_jsonl', None); run.pop('remote_log', None)
     run.update({
@@ -190,6 +220,7 @@ def refresh_one(run_meta, ref):
         'dp_world_size': 8,
         'train_loss_points': train_pairs,
         'val_loss_points': val_pairs,
+        'routing_stats_points': routing_pairs,  # [iter, maxvio, tok_max_per_mb, tok_min_per_mb, tok_mean_per_mb]
         'compare': compare,
         'final_nano_loss': nano[max_iter]['loss'],
         'final_ref_loss': ref.get(max_iter),

@@ -26,6 +26,7 @@ FILES = {
     'fwd_align':   'reports/megatron_weight_alignment.json',
     'gaps':        None,  # synthesized below
     'runs_index':  'reports/runs_index.json',  # list of nano runs available
+    'ref_routing': 'reference/ref_moe_routing_stats.json',  # per-iter ref MoE routing stats
 }
 
 
@@ -42,6 +43,60 @@ def load_all_runs():
             with open(run_path) as f:
                 runs.append(json.load(f))
     return runs
+
+
+def load_monitor(max_points=2000):
+    """Load learning-dynamics monitor.jsonl files.
+
+    Discovery order:
+      1. Per-run: reports/monitor/<run_id>.jsonl   (preferred, when
+         refresh_runs also syncs monitor.jsonl from the GPU box)
+      2. Local:  reports/monitor.jsonl             (single run in the dev box)
+
+    Returns {run_id: [record, ...]}. Each record list is downsampled to
+    ~max_points (stride pick) so the embedded HTML stays small. The schema
+    written by monitor/core.py is kept verbatim — dashboard JS does the
+    per-field extraction.
+    """
+    out = {}
+
+    def _read(path):
+        if not os.path.exists(path):
+            return None
+        records = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    continue
+        if not records:
+            return None
+        # stride-downsample; always keep last
+        if len(records) > max_points:
+            stride = max(1, len(records) // max_points)
+            picked = records[::stride]
+            if picked[-1] is not records[-1]:
+                picked.append(records[-1])
+            records = picked
+        return records
+
+    mon_dir = os.path.join(ROOT, 'reports', 'monitor')
+    if os.path.isdir(mon_dir):
+        for fname in sorted(os.listdir(mon_dir)):
+            if not fname.endswith('.jsonl'):
+                continue
+            recs = _read(os.path.join(mon_dir, fname))
+            if recs:
+                out[fname[:-len('.jsonl')]] = recs
+    local = os.path.join(ROOT, 'reports', 'monitor.jsonl')
+    recs = _read(local)
+    if recs:
+        out.setdefault('local', recs)
+    return out
 
 
 def load(path):
@@ -82,6 +137,8 @@ def main():
             data[key] = load(path)
     # All available runs (new multi-experiment selector)
     data['runs'] = load_all_runs()
+    # Learning-dynamics monitor records (from monitor/ package)
+    data['monitor'] = load_monitor()
 
     # Only keep lm loss and a couple scalars from tb to keep size reasonable
     if data.get('tb'):
@@ -203,6 +260,29 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
 .diff-row .k { color: var(--muted); }
 .diff-row .ref { color: var(--blue); }
 .diff-row .nano { color: var(--warn); }
+/* tab nav between "Alignment" and "Learning dynamics" sub-pages */
+.tabs { display: flex; gap: 2px; padding: 0 28px; background: var(--panel);
+        border-bottom: 1px solid var(--border); position: sticky; top: 62px; z-index: 9; }
+.tab-btn { background: transparent; color: var(--muted); border: none;
+           border-bottom: 2px solid transparent; padding: 10px 16px; cursor: pointer;
+           font-size: 13px; font-weight: 500; letter-spacing: 0.2px;
+           font-family: inherit; transition: color 120ms, border-color 120ms; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--ok); border-bottom-color: var(--ok); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.plot { height: 360px; background: var(--panel); border: 1px solid var(--border);
+        border-radius: 4px; margin: 8px 0; }
+.plot-lg { height: 480px; }
+.empty-state { padding: 28px 20px; text-align: center; color: var(--muted); font-size: 13px;
+               background: var(--panel); border: 1px dashed var(--border); border-radius: 4px; }
+.chart-intro { background: #0b0e13; border-left: 3px solid var(--blue);
+               padding: 10px 14px; margin: 14px 0 6px; border-radius: 0 4px 4px 0;
+               font-size: 12px; line-height: 1.65; color: #c9d1d9; }
+.chart-intro-title { color: var(--blue); font-weight: 600; margin-bottom: 4px;
+                     font-size: 13px; letter-spacing: 0.2px; }
+.chart-intro b { color: #e6edf3; }
+.chart-intro code { background: #161b22; }
 </style>
 </head>
 <body>
@@ -211,7 +291,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
      <span class="small" style="float:right;color:var(--muted)">built __BUILD_TS__</span></h1>
   <div class="subtitle">PAI DLC dlc1q9arre48b0kx · 9 layers / 512 hidden / 4 heads / 2 KV groups · 144 experts, top-8 sigmoid · 447.30M params · 7485 iterations · final lm loss 2.86</div>
 </header>
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="tab-alignment" onclick="switchTab('tab-alignment')">Alignment (与 Megatron 对齐)</button>
+  <button class="tab-btn" data-tab="tab-dynamics" onclick="switchTab('tab-dynamics')">Learning Dynamics (训练动态监控)</button>
+</nav>
 <main>
+<div id="tab-alignment" class="tab-content active">
   <div id="overview" class="cards"></div>
 
   <h2>Reference job <span id="job-status" class="status-pill ok">captured</span></h2>
@@ -230,6 +315,17 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
   <div id="loss-plot" style="height: 420px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;"></div>
   <div id="loss-body"></div>
 
+  <h2>MoE routing (nano vs ref) <span id="routing-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    Per-iter routing imbalance <code>maxvio_micro_batch = (max - mean) / mean</code> and
+    <code>tokens_per_expert</code> stats. Ref is from Megatron master log; nano from
+    train_log.jsonl (requires commit d782fc3 logging — only moediag run has it).
+    <b>大于 ref 3×以上 = nano 路由不同 = 极可能是 +0.005 nat gap 的源头。</b>
+    Uses the same experiment selector / color pickers as the loss chart above.
+  </div>
+  <div id="routing-plot" style="height: 420px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;"></div>
+  <div id="routing-body"></div>
+
   <h2>Forward alignment (Megatron weights → nano forward) <span id="fwd-status" class="status-pill pending">loading…</span></h2>
   <div id="fwd-body"></div>
 
@@ -245,6 +341,145 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
 
   <h2>Alignment gaps <span id="gap-status" class="status-pill pending">loading…</span></h2>
   <div id="gap-body"></div>
+</div><!-- /tab-alignment -->
+
+<div id="tab-dynamics" class="tab-content">
+  <h2>Overview <span id="mon-status" class="status-pill pending">loading…</span></h2>
+  <div id="mon-intro" class="small" style="margin:6px 0 12px;">
+    训练过程中的 learning dynamics 指标，来自 <code>monitor/</code> 包写入的
+    <code>reports/monitor.jsonl</code>。目标：在 500M / 10B-MoE 小尺度 proxy
+    上发现 10B / 200B-MoE 才会暴露的问题（router collapse · attention sink ·
+    残差爆炸 · bf16 饱和），让 scaling 实验 extrapolate 更可信。
+  </div>
+  <div id="mon-cards" class="cards"></div>
+  <div id="mon-runs" style="margin:12px 0;"></div>
+
+  <h2>Loss &amp; stability <span class="status-pill ok">A / F tier</span></h2>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">1. Loss + spike z-score</div>
+    <b>图例：</b>蓝实线 = <code>loss</code>（主 y 轴）；橙点线 = loss 相对 EMA 的
+    <code>z-score</code>（副 y 轴，EMA 用前 20 步均值+方差）；红 × = |z| &gt; 3 的
+    spike 点。<br>
+    <b>怎么分析：</b>loss 曲线应平滑下降；z 在 ±1 之间震荡正常，单个 |z|&gt;3 是噪声，
+    <b>但连续 2 点以上 spike = 实打实的事故</b>（数据异常 / LR 过大 / bf16 溢出），
+    需要降 LR 或回滚。z 连续性增长（不是震荡）暗示优化器 momentum 在放大扰动。
+  </div>
+  <div id="mon-loss-plot" class="plot"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">2. Scale-invariant stability &amp; token efficiency</div>
+    <b>图例：</b>绿线 = <code>grad_norm / loss</code>（F4，跨尺度可比的稳定度代理）；
+    橙线 = <code>Δloss / Δsamples</code>（F5，token 效率，副轴）。<br>
+    <b>怎么分析：</b><code>gn/loss</code> 应缓慢下降或维持稳定，<b>突升 = 优化方向开始震荡</b>；
+    若 500M 和 10B 在同一 progress 点的 <code>gn/loss</code> 差距很大，说明 scaling 不一致
+    （LR/init 该随 scale 调）。<code>Δloss/Δsamples</code> 是 Chinchilla 拟合的直接输入，
+    跨尺度配比不变 = scaling law 成立。
+  </div>
+  <div id="mon-effgn-plot" class="plot"></div>
+
+  <h2>Gradient norm by parameter group <span class="status-pill ok">A1</span></h2>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">3. 分组 grad_norm（log-y）</div>
+    <b>图例：</b>每条线一类参数的 L2 梯度范数——
+    <code>embedding</code> / <code>lm_head</code> / <code>attn_qkv</code> /
+    <code>attn_proj</code> / <code>ffn_gate|up|down</code> / <code>router</code> /
+    <code>shared_expert</code> / <code>routed_expert</code> / <code>norm</code> / <code>other</code>。
+    点击图例可隐藏某类。<br>
+    <b>怎么分析：</b>健康状态下各组 grad 应在 1~2 个数量级内共同下降。
+    <b>某一组突然领跑 = 选择性爆炸</b>——router 组先炸意味着路由学不出、embedding 大于其他 10×
+    意味着 tied-embedding/lm_head 路径失衡、routed_expert 比 shared_expert 大得多暗示
+    capacity 失衡。scaling 时某一组比小尺度比例漂移 = 那部分不是 scale-invariant。
+  </div>
+  <div id="mon-gn-plot" class="plot plot-lg"></div>
+
+  <h2>Residual stream depth profile <span class="status-pill ok">B1 / B2 / B5</span></h2>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">4. 每层残差范数 heatmap（B1）</div>
+    <b>图例：</b>横轴 = iter；纵轴 = layer 序号（0 = 最底层、N-1 = 最顶层）；
+    颜色 = 该层 post-block 输出的 <code>‖x‖₂ / √d</code>（Viridis 色阶，越亮数值越大）。
+    <b>所有层都显示，不采样</b>。<br>
+    <b>怎么分析：</b>健康的残差流应**颜色沿 y 轴缓慢单调变化**（略增或保持平稳）。
+    <b>深度方向颜色指数变亮 = 残差爆炸</b>（init std 或残差 gain 不合适）；
+    <b>颜色变暗到底 = 消失</b>；<b>横向突然变色 = 某步训练态改变</b>。
+    10B+ 深层模型的爆炸问题在 500M 规模常以"第 10 层颜色比第 2 层亮 2 倍"先显形。
+  </div>
+  <div id="mon-resid-heat" class="plot plot-lg"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">5. 每层净贡献比 heatmap（B2）</div>
+    <b>图例：</b>同上；颜色 = <code>‖x_post − x_pre‖ / ‖x_pre‖</code>（Cividis 色阶）——
+    该层对残差流的实际修改比例。<br>
+    <b>怎么分析：</b>健康时每层 contrib ≈ 0.1 ~ 1.0。
+    <b>某层长期接近 0（最暗）= 该层被"跳过"</b>——模块在学一个恒等映射，容量浪费；
+    <b>&gt;2 = 单层过度贡献</b>，预示后续层能信号被淹没。
+    跨尺度比较：10B 某几层 "熄灭" 的问题可以在 500M 规模提前看到苗头。
+  </div>
+  <div id="mon-contrib-heat" class="plot plot-lg"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">6. final residual (ln_f) 幅度（B5 / bf16 饱和 watchdog）</div>
+    <b>图例：</b>红线 = <code>final_resid</code> 绝对值最大（lm_head 的输入）；
+    蓝线 = 标准差；黄虚线 = bf16 最大值 <code>65504</code> 参考。log-y 轴。<br>
+    <b>怎么分析：</b>max 应稳定或缓慢上涨。<b>max 逼近黄线 = bf16 即将饱和 NaN</b>——
+    这是大规模训练中最隐蔽的死因，loss 曲线看不出，小尺度却能提前测到同样趋势。
+    std 突升是全局激活发散，常与 B1 残差爆炸同时出现。
+  </div>
+  <div id="mon-final-plot" class="plot"></div>
+
+  <h2>MoE routing health <span class="status-pill ok">D1 / D2 / D4 / D6</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    MoE 路由 4 大核心信号。每个 MoE 层一条线（按层号连续色环着色，颜色从紫→蓝→绿→黄按层深度渐变），
+    <b>所有 MoE 层都显示，不采样</b>。
+  </div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">7. 负载熵（D1，归一化到 [0, 1]，1.0 = 完美平衡）</div>
+    <b>图例：</b>每条线 <code>L{i}</code> 对应第 i 层 MoE 的
+    <code>H(token分布) / log(num_experts)</code>。<br>
+    <b>怎么分析：</b>健康值应 &gt;0.85 并保持稳定。
+    <b>某层熵持续下降 = router collapse 进行中</b>（少数专家在吃掉大部分流量）。
+    <b>所有层齐跌 = 全局 LR/bias coef 不对</b>；
+    <b>单层孤立跌 = 该层 routing 初始化或 shared expert 占比失衡</b>。
+    这是 MoE scaling 最 early warning 的指标之一。
+  </div>
+  <div id="mon-moe-load" class="plot"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">8. dead expert 数（D2）</div>
+    <b>图例：</b>每条线一层 MoE，<b>y = 当步收到 0 token 的专家数</b>。<br>
+    <b>怎么分析：</b>训练最早期（&lt; 100 iter）dead 数较大是正常冷启动；之后应快速降到 0
+    并维持。<b>dead 数持续 &gt; 总专家数 10%（144→14） = aux-free bias 校正失效</b>，
+    router 的 score correction coefficient（默认 0.001）需要加大，或启用 seq_aux_alpha。
+    200B MoE 最常见的资源浪费模式就是 dead expert 比例持续高企。
+  </div>
+  <div id="mon-moe-dead" class="plot"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">9. top-1 权重占比（D4）</div>
+    <b>图例：</b>每条线一层 MoE，y = top-1 专家权重的 batch 均值。
+    对 top-k 路由，理想值约为 <code>1/k</code>（topk=8 则 ≈ 0.125~0.25 正常）。<br>
+    <b>怎么分析：</b><b>单调上升趋向 1.0 = 一家独大型 collapse</b>，
+    即使 load entropy 还没掉（token 分布还平均），但权重都集中在一个专家上，
+    其他 topk-1 个专家只是"陪跑"——这是更隐蔽的 router 病。
+    和 D1 一起看：D1 高但 D4 也高 = "投票平均但权重集中"，需要看路由分数熵（D3，后续加）。
+  </div>
+  <div id="mon-moe-top1" class="plot"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">10. aux-free 校正 bias |max|（D6）</div>
+    <b>图例：</b>每条线一层 MoE，
+    y = <code>e_score_correction_bias</code> buffer 的 <code>|max|</code>。
+    每个 optim step 加 <code>sign(mean_load − actual_load) × coeff</code>，coeff 通常 1e-3。<br>
+    <b>怎么分析：</b>健康值应在某个小范围波动（如 &lt; 0.05）并随训练稳定收敛。
+    <b>单调线性上升 = router 一直在单向补偿不平衡</b>——说明 gradient 根本没在学平衡路由，
+    全靠 bias 硬拖，通常意味着 score function / group 设置有问题。
+    <b>突然跳变 = 单步 token 分布剧烈变化</b>，对应 loss spike 的前导信号。
+  </div>
+  <div id="mon-moe-bias" class="plot"></div>
+</div><!-- /tab-dynamics -->
 </main>
 
 <script>
@@ -390,25 +625,29 @@ function getSelectedRunIdxs(runs) {
   if (SELECTED_RUN_IDXS === null) SELECTED_RUN_IDXS = defaultSelectedIdxs(runs);
   return SELECTED_RUN_IDXS;
 }
+function _rerenderRunCharts() {
+  renderLoss();
+  if (typeof renderRouting === 'function') renderRouting();
+}
 function toggleRunIdx(i) {
   const runs = DATA.runs || [];
   const sel = getSelectedRunIdxs(runs);
   if (sel.has(i)) sel.delete(i); else sel.add(i);
-  renderLoss();
+  _rerenderRunCharts();
 }
 function setAllRunIdxs(on) {
   const runs = DATA.runs || [];
   SELECTED_RUN_IDXS = new Set();
   if (on) for (let i = 0; i < runs.length; i++) SELECTED_RUN_IDXS.add(i);
-  renderLoss();
+  _rerenderRunCharts();
 }
 function setRunColor(i, hex) {
   RUN_COLOR_OVERRIDES[i] = hex;
-  renderLoss();
+  _rerenderRunCharts();
 }
 function setDiffMode(on) {
   SHOW_DIFF_MODE = !!on;
-  renderLoss();
+  renderLoss();  // diff mode is loss-only
 }
 
 // Categorical high-contrast palette (Plotly-compatible). Chosen so any two
@@ -617,6 +856,80 @@ function renderLoss() {
       legend: { x: 0.7, y: 0.95 },
     }, { responsive: true, displaylogo: false });
   }
+}
+
+// --------- MoE routing (nano vs ref) ---------
+function renderRouting() {
+  const refRouting = DATA.ref_routing;  // list of {iteration, tok_per_expert_max/min/mean, maxvio_micro_batch, ...}
+  const runs = DATA.runs || [];
+  const selected = getSelectedRunIdxs(runs);  // reuse same selector state as loss chart
+
+  if (!refRouting || refRouting.length === 0) {
+    pill('routing-status', 'warn', 'no ref data');
+    document.getElementById('routing-body').innerHTML =
+      `<div class="small">reference/ref_moe_routing_stats.json not found. Run
+      <code>python3 /tmp/extract_ref_moe_stats.py &lt;ref_master.log&gt; reference/ref_moe_routing_stats.json</code>.</div>`;
+    return;
+  }
+
+  const traces = [{
+    x: refRouting.map(r => r.iteration),
+    y: refRouting.map(r => r.maxvio_micro_batch),
+    type: 'scatter', mode: 'lines',
+    name: 'Megatron (ref maxvio)',
+    line: { color: REF_COLOR, width: 1.6 }, yaxis: 'y',
+  }];
+
+  // nano runs that have routing_stats_points
+  let nano_runs_with_routing = 0;
+  for (const i of Array.from(selected).sort((a,b)=>a-b)) {
+    const r = runs[i];
+    if (!r || !r.routing_stats_points || r.routing_stats_points.length === 0) continue;
+    const off = parseInt(r.iter_offset || 0);
+    nano_runs_with_routing += 1;
+    const color = runColor(i);
+    // routing_stats_points: [iter, maxvio, tok_max_per_mb, tok_min_per_mb, tok_mean_per_mb]
+    traces.push({
+      x: r.routing_stats_points.map(p => p[0] + off),
+      y: r.routing_stats_points.map(p => p[1]),
+      type: 'scatter', mode: 'lines+markers',
+      name: `nano maxvio · ${r.run_id}`,
+      line: { color, width: 1.6 },
+      marker: { size: 4, color }, yaxis: 'y',
+    });
+  }
+
+  pill('routing-status',
+       nano_runs_with_routing > 0 ? 'ok' : 'warn',
+       nano_runs_with_routing > 0 ? `${nano_runs_with_routing} nano run(s)` : 'ref only');
+
+  // Summary stats
+  const refMaxvios = refRouting.map(r => r.maxvio_micro_batch);
+  const refMean = refMaxvios.reduce((a,b)=>a+b, 0) / refMaxvios.length;
+  let summaryRows = [
+    ['ref', refMean.toFixed(3), refMaxvios.length + ' iters']
+  ];
+  for (const i of Array.from(selected).sort((a,b)=>a-b)) {
+    const r = runs[i];
+    if (!r || !r.routing_stats_points) continue;
+    const mv = r.routing_stats_points.map(p => p[1]);
+    const mean = mv.reduce((a,b)=>a+b, 0) / mv.length;
+    summaryRows.push([r.run_id, mean.toFixed(3), mv.length + ' iters']);
+  }
+  const summaryTable = `<table style="margin-top:8px;">
+    <thead><tr><th>source</th><th>maxvio mean</th><th>n iters</th></tr></thead>
+    <tbody>${summaryRows.map(r => `<tr><td>${esc(r[0])}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('')}</tbody>
+  </table>`;
+  document.getElementById('routing-body').innerHTML = summaryTable;
+
+  Plotly.newPlot('routing-plot', traces, {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+    font: { color: '#e6edf3', size: 11 },
+    xaxis: { title: 'step', gridcolor: '#30363d' },
+    yaxis: { title: 'maxvio_micro_batch = (max − mean) / mean', gridcolor: '#30363d' },
+    margin: { t: 20, l: 50, r: 40, b: 40 },
+    legend: { x: 0.7, y: 0.95 },
+  }, { responsive: true, displaylogo: false });
 }
 
 // --------- bitwise ---------
@@ -836,18 +1149,320 @@ function renderVal(v) {
   return `<code>${esc(s.length > 80 ? s.slice(0,77)+'…' : s)}</code>`;
 }
 
+// --------- tab switcher ---------
+// Plotly produces zero-sized charts when drawn inside display:none containers,
+// so we must RENDER LAZILY — first time a tab becomes visible, build it.
+// Subsequent switches only resize existing charts.
+const TAB_RENDERED = {};
+const TAB_RENDERERS = { 'tab-dynamics': () => renderMonitor() };
+
+function switchTab(id) {
+  document.querySelectorAll('.tab-content').forEach(el =>
+    el.classList.toggle('active', el.id === id));
+  document.querySelectorAll('.tab-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === id));
+  // Defer to next tick so layout pass runs with the container visible.
+  setTimeout(() => {
+    if (!TAB_RENDERED[id] && TAB_RENDERERS[id]) {
+      TAB_RENDERED[id] = true;
+      try { TAB_RENDERERS[id](); }
+      catch (e) { console.error('tab render failed:', id, e); }
+    } else {
+      document.querySelectorAll('#' + id + ' .plot').forEach(el => {
+        if (el._fullLayout && window.Plotly) Plotly.Plots.resize(el);
+      });
+    }
+  }, 30);
+}
+
+// --------- learning-dynamics monitor ---------
+// Layout convention: monitor-runs is {run_id: [record, ...]}. Each record has
+// at minimum {iter, loss, lr, grad_norm, samples} and often:
+//   loss_z, nan_inf, gn_by_group (obj), gn_over_loss, dloss_dsamples,
+//   final_resid_max, final_resid_std,
+//   block_res_pre/post/contrib (arrays indexed by layer, M-tier),
+//   moe (obj keyed by layer: {load_entropy_norm, load_gini, dead, near_dead,
+//     tokens_routed, score_entropy, top1_share, bias_max, bias_std}).
+let MON_RUN = null;  // selected run_id
+
+function monGetRuns() {
+  const m = DATA.monitor || {};
+  return Object.keys(m).sort();
+}
+function monSelectRun(rid) { MON_RUN = rid; renderMonitor(); }
+function monCurrent() {
+  const runs = monGetRuns();
+  if (!runs.length) return null;
+  if (!MON_RUN || !DATA.monitor[MON_RUN]) MON_RUN = runs[runs.length - 1];
+  return DATA.monitor[MON_RUN];
+}
+function monExtract(recs, fn) {
+  // fn: (rec) -> value or undefined; returns {x: iters, y: vals} filtered.
+  const x = [], y = [];
+  for (const r of recs) {
+    const v = fn(r);
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'number' && !Number.isFinite(v)) continue;
+    x.push(r.iter); y.push(v);
+  }
+  return { x, y };
+}
+function monHeatmap(recs, pickArr) {
+  // pickArr: (rec) -> number[] or undefined.
+  // Returns {x: iters, y: layerIdxs, z: [[layer0 over time], ...]}
+  const cols = [];
+  const xs = [];
+  for (const r of recs) {
+    const a = pickArr(r);
+    if (!a || !a.length) continue;
+    xs.push(r.iter); cols.push(a);
+  }
+  if (!xs.length) return null;
+  const L = Math.max(...cols.map(c => c.length));
+  const z = Array.from({length: L}, () => []);
+  for (const col of cols) {
+    for (let i = 0; i < L; i++) z[i].push(col[i] ?? null);
+  }
+  return { x: xs, y: Array.from({length: L}, (_, i) => i), z };
+}
+function monMoEMatrix(recs, key) {
+  // Per-MoE-layer time series for `key` inside rec.moe[layer].
+  // Returns {iters: [...], layers: [l0, l1, ...], series: {l: [values]}}.
+  const iters = [];
+  const perLayer = {};
+  for (const r of recs) {
+    if (!r.moe) continue;
+    iters.push(r.iter);
+    for (const l of Object.keys(r.moe)) {
+      const li = parseInt(l, 10);
+      if (!Number.isFinite(li)) continue;
+      if (!perLayer[li]) perLayer[li] = [];
+      perLayer[li].push(r.moe[l][key]);
+    }
+  }
+  const layers = Object.keys(perLayer).map(Number).sort((a,b) => a-b);
+  return { iters, layers, series: perLayer };
+}
+
+const MON_LAYOUT = {
+  paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+  font: { color: '#e6edf3', size: 11 },
+  margin: { t: 26, l: 55, r: 40, b: 40 },
+  xaxis: { title: 'iter', gridcolor: '#30363d' },
+  yaxis: { gridcolor: '#30363d' },
+};
+function monPlot(divId, traces, extra) {
+  const el = document.getElementById(divId);
+  if (!el) return;
+  if (!traces || !traces.length) {
+    el.outerHTML = `<div class="empty-state">no data for this chart yet — run training with <code>NANOGPT_MONITOR=1</code></div>`;
+    return;
+  }
+  const layout = Object.assign({}, MON_LAYOUT, extra || {});
+  layout.xaxis = Object.assign({}, MON_LAYOUT.xaxis, (extra || {}).xaxis || {});
+  layout.yaxis = Object.assign({}, MON_LAYOUT.yaxis, (extra || {}).yaxis || {});
+  Plotly.newPlot(divId, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function renderMonitor() {
+  const runs = monGetRuns();
+  if (!runs.length) {
+    pill('mon-status', 'warn', 'no monitor.jsonl');
+    document.getElementById('mon-cards').innerHTML = '';
+    document.getElementById('mon-runs').innerHTML = `
+      <div class="empty-state">
+        <div style="font-size:14px;margin-bottom:8px;color:var(--text);">尚无监控数据</div>
+        启用方式：<code>NANOGPT_MONITOR=1 python3 train.py &lt;config&gt;</code><br>
+        生成的 <code>out_dir/monitor.jsonl</code> 放到 <code>reports/monitor.jsonl</code>
+        （或 <code>reports/monitor/&lt;run_id&gt;.jsonl</code>），再重新 build dashboard。
+      </div>`;
+    ['mon-loss-plot','mon-effgn-plot','mon-gn-plot','mon-resid-heat','mon-contrib-heat',
+     'mon-final-plot','mon-moe-load','mon-moe-dead','mon-moe-top1','mon-moe-bias']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+    return;
+  }
+  const recs = monCurrent();
+  const last = recs[recs.length - 1] || {};
+  const nNaN = recs.filter(r => r.nan_inf).length;
+  const maxZ = recs.reduce((m, r) => Math.max(m, Math.abs(r.loss_z || 0)), 0);
+  const lastFinalMax = last.final_resid_max || 0;
+  const bf16Sat = lastFinalMax > 32000 ? 'err' : lastFinalMax > 8000 ? 'warn' : 'ok';
+  const zCls = maxZ > 3 ? 'err' : maxZ > 1.5 ? 'warn' : 'ok';
+  pill('mon-status', nNaN > 0 ? 'err' : zCls,
+       `${recs.length} records · ${runs.length} run(s)`);
+  document.getElementById('mon-cards').innerHTML = `
+    ${card('run', `<code>${esc(MON_RUN)}</code>`, `records: ${recs.length.toLocaleString()}`, '')}
+    ${card('last iter', fmt(last.iter ?? '-'), `samples: ${(last.samples ?? 0).toLocaleString()}`, '')}
+    ${card('last loss', (last.loss ?? 0).toFixed(4), `lr: ${last.lr?.toExponential(2) ?? '-'}`, '')}
+    ${card('last grad_norm', (last.grad_norm ?? 0).toFixed(3), `gn/loss: ${(last.gn_over_loss ?? 0).toFixed(3)}`, '')}
+    ${card('max |loss_z|', maxZ.toFixed(2), maxZ > 3 ? 'spike (>3σ)' : 'stable', zCls)}
+    ${card('NaN/Inf', nNaN, nNaN > 0 ? 'NUMERICAL INSTABILITY' : 'clean', nNaN > 0 ? 'err' : 'ok')}
+    ${card('final_resid max', lastFinalMax.toFixed(1),
+        bf16Sat === 'err' ? 'bf16 saturation risk' : 'ok (<<65504)', bf16Sat)}`;
+
+  // Run selector
+  document.getElementById('mon-runs').innerHTML = runs.length <= 1 ? '' :
+    `<div class="small" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+       <span>run:</span>
+       ${runs.map(r => `<button onclick="monSelectRun('${esc(r)}')"
+          class="tab-btn" style="padding:4px 10px;font-size:11px;border:1px solid var(--border);border-radius:4px;
+            ${r === MON_RUN ? 'color:var(--ok);border-color:var(--ok);' : ''}">${esc(r)}</button>`).join('')}
+     </div>`;
+
+  // 1. loss + loss_z
+  const loss = monExtract(recs, r => r.loss);
+  const lossZ = monExtract(recs, r => r.loss_z);
+  const spikeX = recs.filter(r => Math.abs(r.loss_z || 0) > 3).map(r => r.iter);
+  const spikeY = recs.filter(r => Math.abs(r.loss_z || 0) > 3).map(r => r.loss);
+  monPlot('mon-loss-plot', [
+    { x: loss.x, y: loss.y, type: 'scatter', mode: 'lines', name: 'loss',
+      line: { color: '#79c0ff', width: 1.4 } },
+    lossZ.x.length ? { x: lossZ.x, y: lossZ.y, type: 'scatter', mode: 'lines',
+      name: 'loss z-score (EMA)', yaxis: 'y2',
+      line: { color: '#d29922', width: 1, dash: 'dot' } } : null,
+    spikeX.length ? { x: spikeX, y: spikeY, type: 'scatter', mode: 'markers',
+      name: `spike (|z|>3) × ${spikeX.length}`,
+      marker: { color: '#f85149', size: 9, symbol: 'x' } } : null,
+  ].filter(Boolean), {
+    title: { text: 'loss + spike z-score', font: { size: 13 } },
+    yaxis: { title: 'loss', gridcolor: '#30363d' },
+    yaxis2: { title: 'z', overlaying: 'y', side: 'right',
+              gridcolor: 'transparent', color: '#d29922',
+              zeroline: true, zerolinecolor: '#30363d' },
+    legend: { x: 0.72, y: 0.98 },
+  });
+
+  // 2. gn/loss + Δloss/Δsamples
+  const gnOverLoss = monExtract(recs, r => r.gn_over_loss);
+  const tokenEff = monExtract(recs, r => r.dloss_dsamples);
+  monPlot('mon-effgn-plot', [
+    gnOverLoss.x.length ? { x: gnOverLoss.x, y: gnOverLoss.y, type: 'scatter', mode: 'lines',
+      name: 'grad_norm / loss (F4)', line: { color: '#7ee787', width: 1.4 } } : null,
+    tokenEff.x.length ? { x: tokenEff.x, y: tokenEff.y, type: 'scatter', mode: 'lines',
+      name: 'Δloss/Δsamples (F5)', yaxis: 'y2',
+      line: { color: '#f0883e', width: 1.2 } } : null,
+  ].filter(Boolean), {
+    title: { text: 'scale-invariant stability / token efficiency', font: { size: 13 } },
+    yaxis: { title: 'gn / loss', gridcolor: '#30363d' },
+    yaxis2: { title: 'Δloss/Δsamples', overlaying: 'y', side: 'right',
+              gridcolor: 'transparent', color: '#f0883e' },
+    legend: { x: 0.72, y: 0.98 },
+  });
+
+  // 3. grad_norm by group (multi-line)
+  const groupKeys = new Set();
+  for (const r of recs) if (r.gn_by_group) Object.keys(r.gn_by_group).forEach(k => groupKeys.add(k));
+  const gnTraces = [];
+  const groupPalette = ['#ff7b72', '#79c0ff', '#7ee787', '#d29922', '#bc8cff',
+                        '#ffa657', '#39d0d8', '#f778ba', '#56d364', '#e3b341', '#8bb9fa'];
+  let gi = 0;
+  for (const g of Array.from(groupKeys).sort()) {
+    const s = monExtract(recs, r => r.gn_by_group && r.gn_by_group[g]);
+    if (!s.x.length) continue;
+    gnTraces.push({
+      x: s.x, y: s.y, type: 'scatter', mode: 'lines',
+      name: g, line: { color: groupPalette[gi % groupPalette.length], width: 1.2 },
+    });
+    gi++;
+  }
+  monPlot('mon-gn-plot', gnTraces, {
+    title: { text: 'grad_norm by parameter group (log-y)', font: { size: 13 } },
+    yaxis: { title: 'L2 grad norm', gridcolor: '#30363d', type: 'log' },
+    legend: { orientation: 'h', y: -0.18 },
+  });
+
+  // 4. residual heatmap (block_res_post)
+  const h1 = monHeatmap(recs, r => r.block_res_post);
+  monPlot('mon-resid-heat', h1 ? [{
+    x: h1.x, y: h1.y, z: h1.z, type: 'heatmap',
+    colorscale: 'Viridis', colorbar: { title: '‖x‖/√d' },
+  }] : [], {
+    title: { text: 'per-layer residual norm (post-block) — B1', font: { size: 13 } },
+    yaxis: { title: 'layer', gridcolor: '#30363d', dtick: 1 },
+  });
+  const h2 = monHeatmap(recs, r => r.block_contrib);
+  monPlot('mon-contrib-heat', h2 ? [{
+    x: h2.x, y: h2.y, z: h2.z, type: 'heatmap',
+    colorscale: 'Cividis', colorbar: { title: '‖Δ‖/‖x‖' },
+  }] : [], {
+    title: { text: 'per-layer net contribution ratio — B2 (near 0 = dead layer)', font: { size: 13 } },
+    yaxis: { title: 'layer', gridcolor: '#30363d', dtick: 1 },
+  });
+
+  // 5. final residual stream max / std
+  const fMax = monExtract(recs, r => r.final_resid_max);
+  const fStd = monExtract(recs, r => r.final_resid_std);
+  monPlot('mon-final-plot', [
+    fMax.x.length ? { x: fMax.x, y: fMax.y, type: 'scatter', mode: 'lines',
+      name: 'final_resid max', line: { color: '#f85149', width: 1.4 } } : null,
+    fStd.x.length ? { x: fStd.x, y: fStd.y, type: 'scatter', mode: 'lines',
+      name: 'final_resid std', line: { color: '#79c0ff', width: 1.2 } } : null,
+    fMax.x.length ? { x: [fMax.x[0], fMax.x[fMax.x.length-1]], y: [65504, 65504],
+      type: 'scatter', mode: 'lines', name: 'bf16 max (65504)',
+      line: { color: '#d29922', width: 1, dash: 'dash' } } : null,
+  ].filter(Boolean), {
+    title: { text: 'final residual (ln_f output) — B5 / bf16 saturation watch', font: { size: 13 } },
+    yaxis: { title: 'magnitude', gridcolor: '#30363d', type: 'log' },
+    legend: { x: 0.02, y: 0.98 },
+  });
+
+  // 6. MoE per-layer: load_entropy_norm, dead, top1_share, bias_max.
+  // Color each layer by HSL hue so every layer gets a distinct color even for
+  // 16-layer models (no palette wrap-around, no layer "sampling" perception).
+  // Layer 0 is violet, hue sweeps through blue→green→yellow as depth increases.
+  function layerColor(i, n) {
+    if (n <= 1) return 'hsl(210, 70%, 60%)';
+    const h = Math.round(280 - (i / (n - 1)) * 220);  // 280 → 60
+    return `hsl(${h}, 70%, 58%)`;
+  }
+  function moeTraces(key, namefmt) {
+    const m = monMoEMatrix(recs, key);
+    if (!m.layers.length) return [];
+    const n = m.layers.length;
+    return m.layers.map((l, i) => ({
+      x: m.iters, y: m.series[l], type: 'scatter', mode: 'lines',
+      name: namefmt(l),
+      line: { color: layerColor(i, n), width: 1.3 },
+    }));
+  }
+  monPlot('mon-moe-load', moeTraces('load_entropy_norm', l => `L${l}`), {
+    title: { text: 'MoE load entropy (1.0 = perfectly balanced) — D1', font: { size: 13 } },
+    yaxis: { title: 'normalized entropy', range: [0, 1.05], gridcolor: '#30363d' },
+    legend: { orientation: 'h', y: -0.18 },
+  });
+  monPlot('mon-moe-dead', moeTraces('dead', l => `L${l} dead`), {
+    title: { text: 'MoE dead experts per layer — D2', font: { size: 13 } },
+    yaxis: { title: 'count', gridcolor: '#30363d' },
+    legend: { orientation: 'h', y: -0.18 },
+  });
+  monPlot('mon-moe-top1', moeTraces('top1_share', l => `L${l} top1`), {
+    title: { text: 'MoE top-1 weight share (1.0 = one expert dominates) — D4', font: { size: 13 } },
+    yaxis: { title: 'top-1 share', gridcolor: '#30363d' },
+    legend: { orientation: 'h', y: -0.18 },
+  });
+  monPlot('mon-moe-bias', moeTraces('bias_max', l => `L${l} bias`), {
+    title: { text: 'aux-free score correction bias |max| per layer — D6', font: { size: 13 } },
+    yaxis: { title: 'bias max', gridcolor: '#30363d' },
+    legend: { orientation: 'h', y: -0.18 },
+  });
+}
+
 // Order matters: render panels first, then overview reads their statuses.
 renderJob();
 renderTokenizer();
 renderData();
 renderModel();
 renderLoss();
+renderRouting();
 renderBitwise();
 renderCkpt();
 renderGaps();
 renderForwardAlign();
 renderChecklist();
 renderOverview();
+// Monitor tab renders lazily on first activation (see switchTab + TAB_RENDERERS).
+// If the page is loaded with #tab-dynamics as the starting tab, trigger now.
+if (location.hash === '#tab-dynamics') switchTab('tab-dynamics');
 </script>
 </body>
 </html>

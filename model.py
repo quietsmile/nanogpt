@@ -946,29 +946,111 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, eps, device_type):
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # 2D tensors: weight matrices and embeddings → weight decay
-        # 1D tensors: biases, norms → no weight decay
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
+    def configure_optimizers(self, weight_decay, learning_rate, betas, eps, device_type,
+                             use_muon=False, muon_lr=None, muon_momentum=0.95, muon_beta2=0.95,
+                             muon_weight_decay=None):
+        """
+        Returns either a stock AdamW (use_muon=False, the alignment baseline) or a
+        MultiOptimizer holding both Muon and AdamW (use_muon=True).
+
+        Param routing when use_muon=True:
+          Muon  ← attention {q,k,v,c}_proj, shared_expert {gate,up,down}_proj,
+                  MoE expert {gate,up,down}_weight (3D batched).
+          AdamW ← embeddings (wte, lm_head), MoE router gate, all 1D params (norms),
+                  any biases.
+        """
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+
+        if not use_muon:
+            # Original alignment-baseline path: single AdamW with 2D-decay / 1D-nodecay split.
+            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+            optim_groups = [
+                {'params': decay_params, 'weight_decay': weight_decay},
+                {'params': nodecay_params, 'weight_decay': 0.0}
+            ]
+            num_decay_params = sum(p.numel() for p in decay_params)
+            num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(
+                optim_groups, lr=learning_rate, betas=betas, eps=eps, **extra_args
+            )
+            print(f"using fused AdamW: {use_fused}")
+            return optimizer
+
+        # Muon path. Name-based routing (NOT dim-based: MoE 3D goes to Muon, embedding 2D
+        # goes to AdamW). Within AdamW, 2D-decay vs 1D-nodecay matches the baseline path
+        # so the only single-variable change vs baseline is which params get NorMuon.
+        from muon import Muon, MultiOptimizer
+
+        def _to_adamw(name: str, param) -> bool:
+            return (
+                name.endswith('wte.weight')
+                or name.endswith('lm_head.weight')
+                or '.router.linear' in name
+                or param.dim() < 2
+            )
+
+        muon_names, muon_params = [], []
+        adam_decay_names, adam_decay_params = [], []
+        adam_nodecay_names, adam_nodecay_params = [], []
+
+        for n, p in param_dict.items():
+            if _to_adamw(n, p):
+                if p.dim() >= 2:
+                    adam_decay_names.append(n)
+                    adam_decay_params.append(p)
+                else:
+                    adam_nodecay_names.append(n)
+                    adam_nodecay_params.append(p)
+            else:
+                muon_names.append(n)
+                muon_params.append(p)
+
+        # Sanity: every param accounted for exactly once
+        seen = set(adam_decay_names) | set(adam_nodecay_names) | set(muon_names)
+        missing = set(param_dict.keys()) - seen
+        if missing:
+            raise RuntimeError(f"unrouted params: {sorted(missing)}")
+        if any('.router.linear' in n for n in muon_names):
+            raise RuntimeError("MoE router weight wrongly routed to Muon")
+
+        muon_lr_eff = muon_lr if muon_lr is not None else (learning_rate * 33.0)
+        muon_wd_eff = muon_weight_decay if muon_weight_decay is not None else weight_decay
+
+        muon_total = sum(p.numel() for p in muon_params)
+        adam_dec_total = sum(p.numel() for p in adam_decay_params)
+        adam_nodec_total = sum(p.numel() for p in adam_nodecay_params)
+        print(f"Muon: {len(muon_params)} tensors, {muon_total:,} params, lr={muon_lr_eff}")
+        print(f"AdamW (decay):   {len(adam_decay_params)} tensors, {adam_dec_total:,} params")
+        print(f"AdamW (nodecay): {len(adam_nodecay_params)} tensors, {adam_nodec_total:,} params")
+        if len(muon_params) <= 4:
+            print(f"  Muon param names: {muon_names}")
+        if len(adam_decay_params) <= 4:
+            print(f"  AdamW decay names: {adam_decay_names}")
+
+        adam_groups = [
+            {'params': adam_decay_params, 'weight_decay': weight_decay},
+            {'params': adam_nodecay_params, 'weight_decay': 0.0},
         ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr=learning_rate, betas=betas, eps=eps, **extra_args
+        adam_extra = dict(fused=True) if use_fused else dict()
+        adamw = torch.optim.AdamW(
+            adam_groups, lr=learning_rate, betas=betas, eps=eps, **adam_extra
         )
-        print(f"using fused AdamW: {use_fused}")
-        return optimizer
+        muon = Muon(
+            muon_params,
+            lr=muon_lr_eff,
+            momentum=muon_momentum,
+            beta2=muon_beta2,
+            weight_decay=muon_wd_eff,
+        )
+        return MultiOptimizer({'adamw': adamw, 'muon': muon})
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
