@@ -676,13 +676,16 @@ while True:
                 d['mg_med'].append(_r._last_topk_margin_median)
                 # Synthetic mb=4: accumulate this layer's per-mb=1 counts. Emit
                 # a per-syn-mb maxvio every _REF_MB_SIZE forwards. Matches ref's
-                # mb=4 granularity so the metric is apples-to-apples.
-                if _syn_buf[_li] is None:
-                    _syn_buf[_li] = _r._last_mb_counts.float().clone()
-                else:
-                    _syn_buf[_li] += _r._last_mb_counts.float()
-                if (micro_step + 1) % _REF_MB_SIZE == 0:
-                    syn_c = _syn_buf[_li] / _REF_MB_SIZE  # per-sample normalize
+                # mb=REF_MB_SIZE granularity so the metric is apples-to-apples.
+                # Two regimes:
+                #   batch_size >= REF_MB_SIZE (e.g. mb=4): each microbatch is already
+                #     at or above ref granularity. Just scale to per-sample and log.
+                #   batch_size < REF_MB_SIZE (e.g. mb=1): accumulate
+                #     REF_MB_SIZE/batch_size consecutive microbatches into a
+                #     "synthetic" mb=REF_MB_SIZE before logging.
+                _mb_per_sample = batch_size
+                if _mb_per_sample >= _REF_MB_SIZE:
+                    syn_c = _r._last_mb_counts.float() / float(_mb_per_sample)
                     syn_mean = float(syn_c.mean().item())
                     syn_max = float(syn_c.max().item())
                     syn_maxvio = (syn_max - syn_mean) / syn_mean if syn_mean > 0 else 0.0
@@ -690,7 +693,23 @@ while True:
                     sd['max'].append(syn_max)
                     sd['mean'].append(syn_mean)
                     sd['maxvio'].append(syn_maxvio)
-                    _syn_buf[_li] = None
+                else:
+                    _group_size = max(1, _REF_MB_SIZE // _mb_per_sample)
+                    if _syn_buf[_li] is None:
+                        _syn_buf[_li] = _r._last_mb_counts.float().clone()
+                    else:
+                        _syn_buf[_li] += _r._last_mb_counts.float()
+                    if (micro_step + 1) % _group_size == 0:
+                        total_samples = _group_size * _mb_per_sample
+                        syn_c = _syn_buf[_li] / float(total_samples)
+                        syn_mean = float(syn_c.mean().item())
+                        syn_max = float(syn_c.max().item())
+                        syn_maxvio = (syn_max - syn_mean) / syn_mean if syn_mean > 0 else 0.0
+                        sd = _syn_stats.setdefault(_li, {'max': [], 'mean': [], 'maxvio': []})
+                        sd['max'].append(syn_max)
+                        sd['mean'].append(syn_mean)
+                        sd['maxvio'].append(syn_maxvio)
+                        _syn_buf[_li] = None
             loss = loss / gradient_accumulation_steps
         X, Y = _get_batch('train')
         scaler.scale(loss).backward()
