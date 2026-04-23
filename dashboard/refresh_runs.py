@@ -75,6 +75,19 @@ RUNS = [
         'iter_offset': 1,  # nano iter N ↔ ref iter N+1 (nano 0-indexed, ref 1-indexed)
         'notes': '所有 bug 修完：use_sequential、LR off-by-one、optim state、greedy routing、loss masks、find_unused_parameters=False。iter 0 bitwise 对齐 ref iter 1。MFU ≈ 9.2% (mb=1, 受限于 lm_head logits tensor memory)。200 步后 Δ ~ -0.025 nat，iter 500 Δ = -0.014 nat，持续收敛到 bf16 ULP 振荡 ceiling。',
     },
+    {
+        'run_id': 'nano-196-v10final-20260422',
+        'label': 'v10 FINAL (fused_RoPE + te.GroupedLinear + NCCL determinism) · 7485步 full retrain',
+        'has_biasfix': True,
+        'host': 'root@22.4.243.44',
+        'remote_jsonl': '/root/nanogpt/out-cybertron-moe-196-from0-fresh/train_log.jsonl',
+        'remote_log': '/root/nanogpt/logs/train_from0_fresh.log',
+        'config': 'config/cybertron_moe_196_from0.py',
+        'started_at': '2026-04-22 00:00:00 +0800',
+        'init_from': 'resume (ref iter_0 weights + Adam step=1, iter_num=0)',
+        'iter_offset': 1,
+        'notes': 'v10 FINAL：fused_apply_rotary_pos_emb (95% drift 源) + te.GroupedLinear + fp32 SwiGLU/MoE/silu + 输入端 EOD mask + NCCL strict determinism。last-100-mean nano=2.8539 / ref=2.8493 / Δ=+0.0047 nat（1/10 step stdev）。Δ 在 ±0.15 nat 震荡并收敛到 ULP。Val loss Δ=+0.023 nat。',
+    },
 ]
 
 

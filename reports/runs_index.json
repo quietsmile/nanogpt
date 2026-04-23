@@ -38,5 +38,13 @@
     "has_biasfix": true,
     "started_at": "2026-04-21 20:00:00 +0800",
     "file": "runs/nano-196-aligned-20260421_200000.json"
+  },
+  {
+    "run_id": "nano-196-v10final-20260422",
+    "label": "v10 FINAL (fused_RoPE + te.GroupedLinear + NCCL determinism) \u00b7 7485\u6b65 full retrain",
+    "iters_completed": 7485,
+    "has_biasfix": true,
+    "started_at": "2026-04-22 00:00:00 +0800",
+    "file": "runs/nano-196-v10final-20260422.json"
   }
 ]

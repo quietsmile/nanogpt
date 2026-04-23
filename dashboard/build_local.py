@@ -375,31 +375,70 @@ function renderModel() {
 }
 
 // --------- loss trajectory ---------
-function currentRunIdx() {
-  const sel = document.getElementById('run-selector');
-  return sel ? parseInt(sel.value) : 0;
+// Multi-select: persist selected run indices in memory across re-renders.
+// Default: pick the latest run (last in list) only — keeps initial chart clean.
+let SELECTED_RUN_IDXS = null;  // Set<int>; null = uninitialized, use default
+function defaultSelectedIdxs(runs) {
+  if (!runs || runs.length === 0) return new Set();
+  return new Set([runs.length - 1]);  // latest only
 }
+function getSelectedRunIdxs(runs) {
+  if (SELECTED_RUN_IDXS === null) SELECTED_RUN_IDXS = defaultSelectedIdxs(runs);
+  return SELECTED_RUN_IDXS;
+}
+function toggleRunIdx(i) {
+  const runs = DATA.runs || [];
+  const sel = getSelectedRunIdxs(runs);
+  if (sel.has(i)) sel.delete(i); else sel.add(i);
+  renderLoss();
+}
+function setAllRunIdxs(on) {
+  const runs = DATA.runs || [];
+  SELECTED_RUN_IDXS = new Set();
+  if (on) for (let i = 0; i < runs.length; i++) SELECTED_RUN_IDXS.add(i);
+  renderLoss();
+}
+
+// Distinct colors per run (cycled). Index 0 → ref (blue reserved), so runs use indexes 1+.
+const RUN_COLORS = ['#7ee787', '#ff7b72', '#d2a8ff', '#ffa657', '#79c0ff',
+                    '#a5d6ff', '#f0883e', '#3fb950', '#db61a2', '#ffdf5d'];
 
 function renderLoss() {
   const l = DATA.loss, tb = DATA.tb;
   const runs = DATA.runs || [];
   if (!l && runs.length === 0) { pill('loss-status', 'err', 'missing'); return; }
   const haveNano = runs.length > 0 || (l && l.nano_present);
-  pill('loss-status', haveNano ? 'ok' : 'warn', haveNano ? `${runs.length || 1} run(s)` : 'ref only');
+  const selected = getSelectedRunIdxs(runs);
+  pill('loss-status', haveNano ? 'ok' : 'warn',
+       haveNano ? `${selected.size}/${runs.length || 1} selected` : 'ref only');
 
-  const idx = currentRunIdx();
-  const rm = runs[idx] || l?.run_meta;
+  // "Summary run" for the meta banner = the single run if exactly one selected,
+  // or the most recent selected run otherwise.
+  const summaryIdx = selected.size > 0 ? Math.max(...selected) : (runs.length - 1);
+  const rm = runs[summaryIdx] || l?.run_meta;
   const cmp = rm?.compare || l?.compare || {};
 
-  // Run picker
+  // Multi-select checkbox picker (replaces the old single-select dropdown).
+  // Each checkbox toggles whether that run's traces appear in the chart;
+  // Plotly's legend-click also toggles individual visibility after render.
   const picker = runs.length > 0 ? `
-    <div style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;font-size:12px;">
-      <span class="small">experiment:</span>
-      <select id="run-selector" onchange="renderLoss()"
-              style="background:#0b0e13;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;min-width:360px;">
-        ${runs.map((r,i) => `<option value="${i}" ${i===idx?'selected':''}>${esc(r.run_id)} — ${esc(r.label)} (${r.iters_completed?.toLocaleString()||'?'} iters)</option>`).join('')}
-      </select>
-      <span class="small" style="margin-left:auto;">${runs.length} run(s) · started ${esc(runs[idx]?.started_at || '')}</span>
+    <div style="margin:4px 0 10px;font-size:12px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <span class="small">experiments (click to toggle; Megatron ref always shown):</span>
+        <button onclick="setAllRunIdxs(true)"  style="background:#0b0e13;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;">select all</button>
+        <button onclick="setAllRunIdxs(false)" style="background:#0b0e13;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;">select none</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;padding:6px 10px;background:#0b0e13;border:1px solid var(--border);border-radius:4px;">
+        ${runs.map((r,i) => {
+          const checked = selected.has(i) ? 'checked' : '';
+          const color = RUN_COLORS[i % RUN_COLORS.length];
+          return `<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap;">
+            <input type="checkbox" ${checked} onchange="toggleRunIdx(${i})" style="accent-color:${color};">
+            <span style="color:${color};font-family:monospace;font-size:11px;">${esc(r.run_id)}</span>
+            <span class="small" style="font-size:11px;">— ${esc(r.label)} (${r.iters_completed?.toLocaleString()||'?'} iters)</span>
+          </label>`;
+        }).join('')}
+      </div>
     </div>` : '';
 
   const metaBanner = rm ? `
@@ -441,37 +480,41 @@ function renderLoss() {
   if (tb && tb['lm loss']) {
     const lm = tb['lm loss'];
     const lr = tb['learning-rate'] || [];
-    const trace1 = {
+    const traces = [{
       x: lm.map(p => p[0]), y: lm.map(p => p[1]),
       type: 'scatter', mode: 'lines', name: 'Megatron (ref lm loss)',
-      line: { color: '#79c0ff', width: 1.2 }, yaxis: 'y',
-    };
-    const traces = [trace1];
+      line: { color: '#79c0ff', width: 1.6 }, yaxis: 'y',
+    }];
 
-    // Overlay selected nano run (preferred) or fall back to legacy nano_log
-    const nanoRun = runs[idx];
-    if (nanoRun && nanoRun.train_loss_points && nanoRun.train_loss_points.length) {
-      // Apply iter_offset so nano's internal iter N is plotted at ref's iter N+offset,
-      // aligning the two curves on the same x-axis. (nano 0-indexed vs ref 1-indexed → offset=1)
-      const off = parseInt(nanoRun.iter_offset || 0);
-      traces.push({
-        x: nanoRun.train_loss_points.map(p => p[0] + off),
-        y: nanoRun.train_loss_points.map(p => p[1]),
-        type: 'scatter', mode: 'lines',
-        name: `nano · ${nanoRun.run_id}` + (off ? ` (+${off})` : ''),
-        line: { color: nanoRun.has_biasfix ? '#7ee787' : '#ff7b72', width: 1.2 }, yaxis: 'y',
-      });
-      if (nanoRun.val_loss_points && nanoRun.val_loss_points.length) {
-        traces.push({
-          x: nanoRun.val_loss_points.map(p => p[0] + off),
-          y: nanoRun.val_loss_points.map(p => p[1]),
-          type: 'scatter', mode: 'lines+markers',
-          name: `nano val (n=${nanoRun.val_loss_points.length})`,
-          line: { color: '#ffa657', width: 2, dash: 'dash' },
-          marker: { size: 8, symbol: 'diamond' }, yaxis: 'y',
-        });
+    // Overlay each selected nano run as its own trace.
+    if (runs.length > 0) {
+      for (const i of Array.from(selected).sort((a,b)=>a-b)) {
+        const r = runs[i];
+        if (!r) continue;
+        const color = RUN_COLORS[i % RUN_COLORS.length];
+        const off = parseInt(r.iter_offset || 0);
+        if (r.train_loss_points && r.train_loss_points.length) {
+          traces.push({
+            x: r.train_loss_points.map(p => p[0] + off),
+            y: r.train_loss_points.map(p => p[1]),
+            type: 'scatter', mode: 'lines',
+            name: `nano · ${r.run_id}` + (off ? ` (+${off})` : ''),
+            line: { color, width: 1.2 }, yaxis: 'y',
+          });
+        }
+        if (r.val_loss_points && r.val_loss_points.length) {
+          traces.push({
+            x: r.val_loss_points.map(p => p[0] + off),
+            y: r.val_loss_points.map(p => p[1]),
+            type: 'scatter', mode: 'lines+markers',
+            name: `nano val · ${r.run_id} (n=${r.val_loss_points.length})`,
+            line: { color, width: 2, dash: 'dash' },
+            marker: { size: 7, symbol: 'diamond', color }, yaxis: 'y',
+          });
+        }
       }
     } else {
+      // Legacy fallback when no runs_index.json exists.
       const nano = DATA.nano_log;
       if (nano && nano.train_loss && nano.train_loss.length) {
         traces.push({
@@ -492,7 +535,7 @@ function renderLoss() {
     if (lr.length) {
       traces.push({
         x: lr.map(p => p[0]), y: lr.map(p => p[1]),
-        type: 'scatter', mode: 'lines', name: 'learning rate',
+        type: 'scatter', mode: 'lines', name: 'Megatron (ref lr schedule)',
         line: { color: '#d29922', width: 1, dash: 'dot' }, yaxis: 'y2',
       });
     }
