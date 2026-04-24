@@ -1,0 +1,59 @@
+# Tier 4 — ~1B active / ~4B total MoE. Pushes single 8×H100 80GB to limits.
+# Requires bucket-padding path (NANO_TE_MOE=0) + bf16 + mb=1 to fit.
+# run scripts/find_max_batch.py to tune gradient_accumulation if OOM.
+name: tier4_moe_1b
+family: moe
+
+arch:
+  n_layer: 16
+  n_head: 8
+  n_embd: 1024
+  n_kv_head: 4
+  kv_channels: 128
+  use_rope: true
+  rotary_base: 50000
+  use_rmsnorm: true
+  norm_eps: 1e-5
+  use_swiglu: true
+  ffn_hidden_size: 3072
+  qk_layernorm: true
+  tie_embeddings: false
+  init_std: 0.005
+  disable_scaled_init_method: true
+  vocab_size_override: 152064
+  block_size: 8192
+  use_moe: true
+  moe_layer_freq: [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+  num_experts: 192
+  moe_ffn_hidden_size: 320
+  moe_router_topk: 8
+  moe_n_group: 8
+  moe_topk_group: 1
+  moe_norm_topk_prob: true
+  moe_router_score_correction_coeff: 0.001
+  moe_shared_expert_hidden_size: 320
+  moe_routing_type: greedy
+  seq_aux_balance_alpha: 0.0001
+  eod_token_id: 151643
+  mask_loss_id: 160000
+
+train:
+  gradient_accumulation_steps: 16   # tune via find_max_batch
+  batch_size: 1
+  global_batch_size: 128
+  max_iters: 12000
+  learning_rate: 0.0008
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  adam_eps: 1.0e-15
+  grad_clip: 1.0
+
+schedule:
+  lr_decay_style: wsd-exp
+  min_lr: 8.0e-5
+  warmup_samples: 65536
+  constant_samples: 1048576
+  decay_end_samples: 1310720
+
+dataset: cybertron_baseline

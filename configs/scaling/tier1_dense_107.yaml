@@ -1,0 +1,45 @@
+# Tier 1 — scaling_dense_00107_nc (190M params dense)
+# Single machine 8-GPU H100 — baseline, should fit comfortably
+name: tier1_dense_107
+family: dense
+
+arch:
+  n_layer: 8
+  n_head: 4
+  n_embd: 528
+  n_kv_head: 2
+  kv_channels: 128
+  use_rope: true
+  rotary_base: 50000
+  use_rmsnorm: true
+  norm_eps: 1e-5
+  use_swiglu: true
+  ffn_hidden_size: 1824
+  qk_layernorm: true
+  tie_embeddings: false
+  init_std: 0.006
+  disable_scaled_init_method: true
+  vocab_size_override: 152064
+  block_size: 8192
+  use_moe: false
+
+train:
+  gradient_accumulation_steps: 6   # gbs=48 when DP=8 × mb=1
+  batch_size: 1
+  global_batch_size: 48
+  max_iters: 6711
+  learning_rate: 0.001063
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  adam_eps: 1.0e-15
+  grad_clip: 1.0
+
+schedule:
+  lr_decay_style: wsd-exp
+  min_lr: 1.063e-4
+  warmup_samples: 32000
+  constant_samples: 257856
+  decay_end_samples: 322112
+
+dataset: cybertron_baseline
