@@ -1,0 +1,161 @@
+# v1.0.0 Muon baseline — MoE-196 use_muon=True muon_impl='megatron' det=True seed=1337
+# From PAI job dlc15nog7ec9p9qd. Purpose: stage 1 bitwise validation target.
+config: cfg=config/v2_muon_megatron_50iter.py
+deterministic: true
+seed: 1337
+muon_impl: megatron
+init_from: scratch
+iters:
+  - iter: 0
+    loss: 11.9401025772
+    grad_norm: 2.3566679955
+  - iter: 1
+    loss: 11.9422216415
+    grad_norm: 2.3115706444
+  - iter: 2
+    loss: 11.9399003983
+    grad_norm: 2.6005394459
+  - iter: 3
+    loss: 11.9348192215
+    grad_norm: 2.2965438366
+  - iter: 4
+    loss: 11.9288167953
+    grad_norm: 2.2549059391
+  - iter: 5
+    loss: 11.9238567352
+    grad_norm: 2.1458146572
+  - iter: 6
+    loss: 11.9177570343
+    grad_norm: 2.3941271305
+  - iter: 7
+    loss: 11.9091577530
+    grad_norm: 2.3651442528
+  - iter: 8
+    loss: 11.9031324387
+    grad_norm: 2.4070138931
+  - iter: 9
+    loss: 11.8896255493
+    grad_norm: 2.3865294456
+  - iter: 10
+    loss: 11.8779373169
+    grad_norm: 2.5300443172
+  - iter: 11
+    loss: 11.8639068604
+    grad_norm: 2.4759020805
+  - iter: 12
+    loss: 11.8505334854
+    grad_norm: 2.4681928158
+  - iter: 13
+    loss: 11.8374109268
+    grad_norm: 2.3935720921
+  - iter: 14
+    loss: 11.8128147125
+    grad_norm: 2.5710451603
+  - iter: 15
+    loss: 11.7948722839
+    grad_norm: 2.6066548824
+  - iter: 16
+    loss: 11.7769203186
+    grad_norm: 2.6146824360
+  - iter: 17
+    loss: 11.7527666092
+    grad_norm: 2.5230734348
+  - iter: 18
+    loss: 11.7276248932
+    grad_norm: 2.7731382847
+  - iter: 19
+    loss: 11.7019863129
+    grad_norm: 2.6141953468
+  - iter: 20
+    loss: 11.6706562042
+    grad_norm: 2.6804285049
+  - iter: 21
+    loss: 11.6444711685
+    grad_norm: 2.5188205242
+  - iter: 22
+    loss: 11.6235637665
+    grad_norm: 2.5258371830
+  - iter: 23
+    loss: 11.5826339722
+    grad_norm: 2.5316345692
+  - iter: 24
+    loss: 11.5476198196
+    grad_norm: 2.5893657207
+  - iter: 25
+    loss: 11.5154762268
+    grad_norm: 2.4396629333
+  - iter: 26
+    loss: 11.4756755829
+    grad_norm: 2.5566923618
+  - iter: 27
+    loss: 11.4361963272
+    grad_norm: 2.7152254581
+  - iter: 28
+    loss: 11.4009838104
+    grad_norm: 2.5015487671
+  - iter: 29
+    loss: 11.3547735214
+    grad_norm: 2.6282789707
+  - iter: 30
+    loss: 11.3158006668
+    grad_norm: 2.6122150421
+  - iter: 31
+    loss: 11.2892827988
+    grad_norm: 2.5546901226
+  - iter: 32
+    loss: 11.2395067215
+    grad_norm: 2.6155385971
+  - iter: 33
+    loss: 11.1851768494
+    grad_norm: 2.5930445194
+  - iter: 34
+    loss: 11.1400032043
+    grad_norm: 2.6949040890
+  - iter: 35
+    loss: 11.1010694504
+    grad_norm: 2.6113348007
+  - iter: 36
+    loss: 11.0474557877
+    grad_norm: 2.5806262493
+  - iter: 37
+    loss: 10.9983234406
+    grad_norm: 2.6445839405
+  - iter: 38
+    loss: 10.9378051758
+    grad_norm: 2.6874237061
+  - iter: 39
+    loss: 10.8896751404
+    grad_norm: 2.6322312355
+  - iter: 40
+    loss: 10.8491458893
+    grad_norm: 2.5633111000
+  - iter: 41
+    loss: 10.7795190811
+    grad_norm: 2.6398198605
+  - iter: 42
+    loss: 10.7532672882
+    grad_norm: 2.4747076035
+  - iter: 43
+    loss: 10.6960220337
+    grad_norm: 2.4494841099
+  - iter: 44
+    loss: 10.6165027618
+    grad_norm: 2.4582562447
+  - iter: 45
+    loss: 10.5662231445
+    grad_norm: 2.4479510784
+  - iter: 46
+    loss: 10.5049057007
+    grad_norm: 2.3619616032
+  - iter: 47
+    loss: 10.4430322647
+    grad_norm: 2.3858447075
+  - iter: 48
+    loss: 10.4047975540
+    grad_norm: 2.2397325039
+  - iter: 49
+    loss: 10.3539867401
+    grad_norm: 2.1832451820
+  - iter: 50
+    loss: 10.2672424316
+    grad_norm: 2.1562926769
