@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from .primitives import RMSNorm, LayerNorm, linear_cross_entropy
+from .primitives import RMSNorm, LayerNorm, linear_cross_entropy, ChunkedLinearCrossEntropy
 from .attention import CausalSelfAttention
 from .mlp import MLP, SwiGLUMLP, MoEFFN, MoERouter
 from .block import Block

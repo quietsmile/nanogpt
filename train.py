@@ -30,7 +30,14 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model import GPTConfig, GPT
+# NANOGPT_V2_MODEL=1 env flag routes to the refactored nanogpt.model package.
+# Both paths must be bitwise-equivalent (verified by PAI 50-iter det tests).
+import os as _os_v2
+if _os_v2.environ.get("NANOGPT_V2_MODEL", "0") == "1":
+    from nanogpt.model import GPT, GPTConfig
+    print("[train.py] using nanogpt.model.GPT (v2)")
+else:
+    from model import GPT, GPTConfig
 from monitor import create_monitor
 
 # -----------------------------------------------------------------------------
@@ -632,7 +639,10 @@ while True:
     # accumulated for logging. Each dict maps layer index → list of per-mb
     # metric values across the grad_accum microbatches.
     _mb_router = {}   # layer_idx -> dict of lists (per-mb=1 stats)
-    from model import MoERouter as _MoERouter_t
+    if _os_v2.environ.get("NANOGPT_V2_MODEL", "0") == "1":
+        from nanogpt.model import MoERouter as _MoERouter_t
+    else:
+        from model import MoERouter as _MoERouter_t
     _moe_routers = [m for m in raw_model.modules() if isinstance(m, _MoERouter_t)]
     # Running raw-count buffers for synthetic-mb=4 stats — aggregate 4 consecutive
     # mb=1 forwards' counts into one "logical mb=4" microbatch, matching ref's
@@ -729,7 +739,10 @@ while True:
     # microbatches, then take global max/min/mean + maxVio = (max - mean)/mean.
     # Matches ref master log columns `tokens_per_expert/{max,min,mean}` and
     # `maxVio/{micro_batch,global_batch}`.
-    from model import MoERouter
+    if _os_v2.environ.get("NANOGPT_V2_MODEL", "0") == "1":
+        from nanogpt.model import MoERouter
+    else:
+        from model import MoERouter
     _moe_counts = []  # one tensor [E] per MoE layer (fp32, local-rank counts)
     for _m in raw_model.modules():
         if isinstance(_m, MoERouter):
