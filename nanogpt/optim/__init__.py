@@ -9,5 +9,9 @@ The Muon algorithm is expressed as a list of OptimStep instances (a "recipe"):
 Swapping algorithm parts = edit the recipe, no new optimizer class needed.
 Each step is unit-testable in isolation.
 """
+from . import recipes
+from .multi import MultiOptimizer
+from .muon import Muon
 from .pipeline import OptimStep, StepContext
-__all__ = ["OptimStep", "StepContext"]
+
+__all__ = ["OptimStep", "StepContext", "Muon", "MultiOptimizer", "recipes"]
