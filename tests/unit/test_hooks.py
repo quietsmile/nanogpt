@@ -63,15 +63,13 @@ def test_count():
     assert h.count() == 3
 
 
-def test_on_decorator_returns_function():
+def test_on_returns_function():
+    """on() returns the registered fn so code can keep a handle."""
     h = Hooks()
-
-    @h.on("x")
     def my_handler(val):
         return val * 2
-
-    # function is still usable directly
-    assert my_handler(5) == 10
+    ret = h.on("x", my_handler)
+    assert ret is my_handler  # for chainability
     assert h.count("x") == 1
 
 
