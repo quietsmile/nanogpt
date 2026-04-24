@@ -1,0 +1,44 @@
+# Tier 3 — ~500M dense. Fits single 8×H100 80GB with mb=1 + bf16.
+name: tier3_dense_500m
+family: dense
+
+arch:
+  n_layer: 16
+  n_head: 8
+  n_embd: 1024
+  n_kv_head: 4
+  kv_channels: 128
+  use_rope: true
+  rotary_base: 50000
+  use_rmsnorm: true
+  norm_eps: 1e-5
+  use_swiglu: true
+  ffn_hidden_size: 3584
+  qk_layernorm: true
+  tie_embeddings: false
+  init_std: 0.005
+  disable_scaled_init_method: true
+  vocab_size_override: 152064
+  block_size: 8192
+  use_moe: false
+
+train:
+  gradient_accumulation_steps: 8
+  batch_size: 1
+  global_batch_size: 64
+  max_iters: 10000
+  learning_rate: 0.0008
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  adam_eps: 1.0e-15
+  grad_clip: 1.0
+
+schedule:
+  lr_decay_style: wsd-exp
+  min_lr: 8.0e-5
+  warmup_samples: 32000
+  constant_samples: 512000
+  decay_end_samples: 640000
+
+dataset: cybertron_baseline

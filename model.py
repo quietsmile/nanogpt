@@ -1147,8 +1147,30 @@ class GPT(nn.Module):
             from muon_megatron import Muon, MultiOptimizer
         elif muon_impl == 'normuon':
             from muon import Muon, MultiOptimizer
+        elif muon_impl == 'megatron_v2':
+            # nanogpt.optim pipeline-based Muon with muon_megatron recipe.
+            # Must be bitwise-equivalent to 'megatron' under det=True.
+            from nanogpt.optim import Muon as _NewMuon
+            from nanogpt.optim import MultiOptimizer
+            from nanogpt.optim.recipes import muon_megatron as _recipe_megatron
+
+            def Muon(params, lr, momentum_beta, weight_decay, **kw):
+                return _NewMuon(
+                    params,
+                    pipeline=_recipe_megatron(
+                        momentum_beta=momentum_beta,
+                        use_nesterov=kw.get("use_nesterov", True),
+                        coefficient_type=kw.get("coefficient_type", "quintic"),
+                        num_ns_steps=kw.get("num_ns_steps", 5),
+                        muon_matched_adamw_rms=kw.get("muon_matched_adamw_rms", 0.2),
+                        fp32_matmul_prec=kw.get("fp32_matmul_prec", "medium"),
+                    ),
+                    lr=lr,
+                    weight_decay=weight_decay,
+                )
         else:
-            raise ValueError(f"unknown muon_impl '{muon_impl}' (expected 'normuon' or 'megatron')")
+            raise ValueError(f"unknown muon_impl {muon_impl!r} "
+                             "(expected 'normuon', 'megatron', or 'megatron_v2')")
         print(f"Muon impl: {muon_impl}")
 
         def _to_adamw(name: str, param) -> bool:
@@ -1207,8 +1229,8 @@ class GPT(nn.Module):
         adamw = torch.optim.AdamW(
             adam_groups, lr=learning_rate, betas=betas, eps=eps, **adam_extra
         )
-        if muon_impl == 'megatron':
-            # Megatron port: uses momentum_beta, coefficient_type, etc. No beta2.
+        if muon_impl in ('megatron', 'megatron_v2'):
+            # Megatron port (v1 or v2 pipeline): uses momentum_beta, coefficient_type, etc. No beta2.
             muon = Muon(
                 muon_params,
                 lr=muon_lr_eff,

@@ -1,0 +1,212 @@
+# v1.0.0 canonical baseline — scaling_moe_00196, det=True, seed=1337, init_from=scratch
+# Generated from PAI job dlcb4rhu2viu48kj (ws 262162).
+# Tolerance: bitwise fp32 for loss+grad_norm, strict det env required.
+config: config/cybertron_moe_196.py + overrides (det=True seed=1337 max_iters=50 init_from=scratch)
+deterministic: true
+seed: 1337
+init_from: scratch
+iters:
+  - iter: 0
+    loss: 11.9401025772
+    grad_norm: 2.3566679955
+    aux_contrib_mean: 0.000108698653
+  - iter: 1
+    loss: 11.9378385544
+    grad_norm: 2.3215763569
+    aux_contrib_mean: 0.000108687924
+  - iter: 2
+    loss: 11.9256334305
+    grad_norm: 2.5326442719
+    aux_contrib_mean: 0.000108279204
+  - iter: 3
+    loss: 11.9104871750
+    grad_norm: 2.1452176571
+    aux_contrib_mean: 0.000108566376
+  - iter: 4
+    loss: 11.8919515610
+    grad_norm: 1.9263939857
+    aux_contrib_mean: 0.000108347936
+  - iter: 5
+    loss: 11.8757324219
+    grad_norm: 1.8782027960
+    aux_contrib_mean: 0.000108522310
+  - iter: 6
+    loss: 11.8478870392
+    grad_norm: 1.8708122969
+    aux_contrib_mean: 0.000109093905
+  - iter: 7
+    loss: 11.8253087997
+    grad_norm: 1.8371316195
+    aux_contrib_mean: 0.000109136064
+  - iter: 8
+    loss: 11.8045883179
+    grad_norm: 1.6898473501
+    aux_contrib_mean: 0.000109011924
+  - iter: 9
+    loss: 11.7825450897
+    grad_norm: 1.5217648745
+    aux_contrib_mean: 0.000109459234
+  - iter: 10
+    loss: 11.7552766800
+    grad_norm: 1.5773758888
+    aux_contrib_mean: 0.000109903006
+  - iter: 11
+    loss: 11.7360830307
+    grad_norm: 1.5247907639
+    aux_contrib_mean: 0.000110106501
+  - iter: 12
+    loss: 11.7209262848
+    grad_norm: 1.4002101421
+    aux_contrib_mean: 0.000110349272
+  - iter: 13
+    loss: 11.7020063400
+    grad_norm: 1.3989515305
+    aux_contrib_mean: 0.000110461515
+  - iter: 14
+    loss: 11.6694612503
+    grad_norm: 1.3633041382
+    aux_contrib_mean: 0.000110526043
+  - iter: 15
+    loss: 11.6484680176
+    grad_norm: 1.3501509428
+    aux_contrib_mean: 0.000110392511
+  - iter: 16
+    loss: 11.6293544769
+    grad_norm: 1.3353959322
+    aux_contrib_mean: 0.000110339786
+  - iter: 17
+    loss: 11.6139688492
+    grad_norm: 1.2448214293
+    aux_contrib_mean: 0.000110127085
+  - iter: 18
+    loss: 11.5759067535
+    grad_norm: 1.3519902229
+    aux_contrib_mean: 0.000109708086
+  - iter: 19
+    loss: 11.5530567169
+    grad_norm: 1.4339987040
+    aux_contrib_mean: 0.000109612074
+  - iter: 20
+    loss: 11.5201272964
+    grad_norm: 1.3407878876
+    aux_contrib_mean: 0.000109227641
+  - iter: 21
+    loss: 11.4971313477
+    grad_norm: 1.2423882484
+    aux_contrib_mean: 0.000109543161
+  - iter: 22
+    loss: 11.4725818634
+    grad_norm: 1.2523846626
+    aux_contrib_mean: 0.000108651142
+  - iter: 23
+    loss: 11.4305133820
+    grad_norm: 1.2863250971
+    aux_contrib_mean: 0.000108586537
+  - iter: 24
+    loss: 11.3900938034
+    grad_norm: 1.3159378767
+    aux_contrib_mean: 0.000108173946
+  - iter: 25
+    loss: 11.3621711731
+    grad_norm: 1.2305486202
+    aux_contrib_mean: 0.000108449412
+  - iter: 26
+    loss: 11.3162899017
+    grad_norm: 1.2981621027
+    aux_contrib_mean: 0.000108555801
+  - iter: 27
+    loss: 11.2639112473
+    grad_norm: 1.4046003819
+    aux_contrib_mean: 0.000108433976
+  - iter: 28
+    loss: 11.2388067245
+    grad_norm: 1.2542330027
+    aux_contrib_mean: 0.000108322038
+  - iter: 29
+    loss: 11.1864604950
+    grad_norm: 1.3040616512
+    aux_contrib_mean: 0.000107798081
+  - iter: 30
+    loss: 11.1472663879
+    grad_norm: 1.3129715919
+    aux_contrib_mean: 0.000108616138
+  - iter: 31
+    loss: 11.1188764572
+    grad_norm: 1.2327325344
+    aux_contrib_mean: 0.000108691729
+  - iter: 32
+    loss: 11.0643424988
+    grad_norm: 1.3184869289
+    aux_contrib_mean: 0.000108163208
+  - iter: 33
+    loss: 11.0110664368
+    grad_norm: 1.2506610155
+    aux_contrib_mean: 0.000108031725
+  - iter: 34
+    loss: 10.9576797485
+    grad_norm: 1.3345886469
+    aux_contrib_mean: 0.000108137430
+  - iter: 35
+    loss: 10.9192018509
+    grad_norm: 1.2475715876
+    aux_contrib_mean: 0.000107942366
+  - iter: 36
+    loss: 10.8640499115
+    grad_norm: 1.2235128880
+    aux_contrib_mean: 0.000108392384
+  - iter: 37
+    loss: 10.8081092834
+    grad_norm: 1.2663700581
+    aux_contrib_mean: 0.000108710588
+  - iter: 38
+    loss: 10.7441596985
+    grad_norm: 1.3208414316
+    aux_contrib_mean: 0.000108856613
+  - iter: 39
+    loss: 10.7010650635
+    grad_norm: 1.3374733925
+    aux_contrib_mean: 0.000108506100
+  - iter: 40
+    loss: 10.6602106094
+    grad_norm: 1.2538263798
+    aux_contrib_mean: 0.000108683299
+  - iter: 41
+    loss: 10.5814132690
+    grad_norm: 1.3041310310
+    aux_contrib_mean: 0.000108643589
+  - iter: 42
+    loss: 10.5648860931
+    grad_norm: 1.3121349812
+    aux_contrib_mean: 0.000109118452
+  - iter: 43
+    loss: 10.5075197220
+    grad_norm: 1.4035347700
+    aux_contrib_mean: 0.000109236434
+  - iter: 44
+    loss: 10.4232559204
+    grad_norm: 1.2814847231
+    aux_contrib_mean: 0.000109401315
+  - iter: 45
+    loss: 10.3707704544
+    grad_norm: 1.2595543861
+    aux_contrib_mean: 0.000109269233
+  - iter: 46
+    loss: 10.3138103485
+    grad_norm: 1.2972409725
+    aux_contrib_mean: 0.000109535146
+  - iter: 47
+    loss: 10.2509546280
+    grad_norm: 1.2897723913
+    aux_contrib_mean: 0.000110265150
+  - iter: 48
+    loss: 10.2246370316
+    grad_norm: 1.1439031363
+    aux_contrib_mean: 0.000110174953
+  - iter: 49
+    loss: 10.1726436615
+    grad_norm: 1.2314076424
+    aux_contrib_mean: 0.000110269952
+  - iter: 50
+    loss: 10.0853834152
+    grad_norm: 1.2469108105
+    aux_contrib_mean: 0.000110469366

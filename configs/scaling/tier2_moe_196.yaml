@@ -1,0 +1,58 @@
+# Tier 2 — scaling_moe_00196 (447M total / 150M active params, MoE)
+# Single machine 8-GPU H100 — fits with bucket-padding path
+name: tier2_moe_196
+family: moe
+
+arch:
+  n_layer: 9
+  n_head: 4
+  n_embd: 512
+  n_kv_head: 2
+  kv_channels: 64
+  use_rope: true
+  rotary_base: 50000
+  use_rmsnorm: true
+  norm_eps: 1e-5
+  use_swiglu: true
+  ffn_hidden_size: 1536
+  qk_layernorm: true
+  tie_embeddings: false
+  init_std: 0.006
+  disable_scaled_init_method: true
+  vocab_size_override: 152064
+  block_size: 8192
+  use_moe: true
+  moe_layer_freq: [0, 1, 1, 1, 1, 1, 1, 1, 1]
+  num_experts: 144
+  moe_ffn_hidden_size: 160
+  moe_router_topk: 8
+  moe_n_group: 8
+  moe_topk_group: 1
+  moe_norm_topk_prob: true
+  moe_router_score_correction_coeff: 0.001
+  moe_shared_expert_hidden_size: 160
+  moe_routing_type: greedy
+  seq_aux_balance_alpha: 0.0001
+  eod_token_id: 151643
+  mask_loss_id: 160000
+
+train:
+  gradient_accumulation_steps: 8
+  batch_size: 1
+  global_batch_size: 64
+  max_iters: 7485
+  learning_rate: 0.0012
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  adam_eps: 1.0e-15
+  grad_clip: 1.0
+
+schedule:
+  lr_decay_style: wsd-exp
+  min_lr: 1.2e-4
+  warmup_samples: 32000
+  constant_samples: 383232
+  decay_end_samples: 479040
+
+dataset: cybertron_baseline
