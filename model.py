@@ -635,14 +635,18 @@ class MoEFFN(nn.Module):
             # TODO cache if perf matters. For now, reinstantiate.
             # Use te.GroupedLinear for experts (matches ref's fused grouped_gemm)
             H_ffn = self.gate_weight.shape[-1]
+            # Speed: bf16 weights in GroupedLinear match ref's bf16=True yaml and
+            # avoid the fp32×bf16 matmul penalty. Env NANO_TE_MOE_FP32=1 to opt out.
+            import os as _os
+            _gl_dtype = torch.float32 if _os.environ.get('NANO_TE_MOE_FP32', '0') == '1' else torch.bfloat16
             if not hasattr(self, '_gl_fc1'):
                 self._gl_fc1 = _te.GroupedLinear(
                     num_gemms=E, in_features=C, out_features=2*H_ffn, bias=False,
-                    params_dtype=torch.float32, device=x.device,
+                    params_dtype=_gl_dtype, device=x.device,
                 )
                 self._gl_fc2 = _te.GroupedLinear(
                     num_gemms=E, in_features=H_ffn, out_features=C, bias=False,
-                    params_dtype=torch.float32, device=x.device,
+                    params_dtype=_gl_dtype, device=x.device,
                 )
                 # Copy nano weights into per-expert weights (gate_weight [E,C,H], up_weight [E,C,H], down_weight [E,H,C])
                 with torch.no_grad():
@@ -650,8 +654,8 @@ class MoEFFN(nn.Module):
                         gate_e = self.gate_weight[e].T.contiguous()  # [H, C]
                         up_e = self.up_weight[e].T.contiguous()      # [H, C]
                         fc1_e = torch.cat([gate_e, up_e], dim=0)     # [2H, C]
-                        getattr(self._gl_fc1, f'weight{e}').data.copy_(fc1_e.float())
-                        getattr(self._gl_fc2, f'weight{e}').data.copy_(self.down_weight[e].T.contiguous().float())
+                        getattr(self._gl_fc1, f'weight{e}').data.copy_(fc1_e.to(_gl_dtype))
+                        getattr(self._gl_fc2, f'weight{e}').data.copy_(self.down_weight[e].T.contiguous().to(_gl_dtype))
             m_splits = routing_map.sum(dim=0).tolist()
             h12 = self._gl_fc1(permuted, m_splits=m_splits)
             gate, up = h12.chunk(2, dim=-1)
@@ -1095,10 +1099,17 @@ class GPT(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, eps, device_type,
                              use_muon=False, muon_lr=None, muon_momentum=0.95, muon_beta2=0.95,
-                             muon_weight_decay=None):
+                             muon_weight_decay=None, muon_impl='normuon'):
         """
         Returns either a stock AdamW (use_muon=False, the alignment baseline) or a
         MultiOptimizer holding both Muon and AdamW (use_muon=True).
+
+        muon_impl selects which Muon variant:
+          'normuon' (default) — modded-nanogpt NorMuon + Polar Express + Cautious WD
+                                 (muon.py)
+          'megatron'           — faithful port of Megatron Muon (quintic NS,
+                                 spectral scale, matched_adamw_rms=0.2), aligned
+                                 with the PAI Muon reference (muon_megatron.py)
 
         Param routing when use_muon=True:
           Muon  ← attention {q,k,v,c}_proj, shared_expert {gate,up,down}_proj,
@@ -1132,7 +1143,13 @@ class GPT(nn.Module):
         # Muon path. Name-based routing (NOT dim-based: MoE 3D goes to Muon, embedding 2D
         # goes to AdamW). Within AdamW, 2D-decay vs 1D-nodecay matches the baseline path
         # so the only single-variable change vs baseline is which params get NorMuon.
-        from muon import Muon, MultiOptimizer
+        if muon_impl == 'megatron':
+            from muon_megatron import Muon, MultiOptimizer
+        elif muon_impl == 'normuon':
+            from muon import Muon, MultiOptimizer
+        else:
+            raise ValueError(f"unknown muon_impl '{muon_impl}' (expected 'normuon' or 'megatron')")
+        print(f"Muon impl: {muon_impl}")
 
         def _to_adamw(name: str, param) -> bool:
             return (
@@ -1190,13 +1207,22 @@ class GPT(nn.Module):
         adamw = torch.optim.AdamW(
             adam_groups, lr=learning_rate, betas=betas, eps=eps, **adam_extra
         )
-        muon = Muon(
-            muon_params,
-            lr=muon_lr_eff,
-            momentum=muon_momentum,
-            beta2=muon_beta2,
-            weight_decay=muon_wd_eff,
-        )
+        if muon_impl == 'megatron':
+            # Megatron port: uses momentum_beta, coefficient_type, etc. No beta2.
+            muon = Muon(
+                muon_params,
+                lr=muon_lr_eff,
+                momentum_beta=muon_momentum,
+                weight_decay=muon_wd_eff,
+            )
+        else:  # 'normuon'
+            muon = Muon(
+                muon_params,
+                lr=muon_lr_eff,
+                momentum=muon_momentum,
+                beta2=muon_beta2,
+                weight_decay=muon_wd_eff,
+            )
         return MultiOptimizer({'adamw': adamw, 'muon': muon})
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):

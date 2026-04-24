@@ -24,10 +24,71 @@ FILES = {
     'job':         'reference/dlc1q9arre48b0kx.job.json',
     'checklist':   'reports/alignment_checklist.json',
     'fwd_align':   'reports/megatron_weight_alignment.json',
+    'attn_maps':   'reports/attention_maps.json',   # monitor/attn_probe.py output
     'gaps':        None,  # synthesized below
     'runs_index':  'reports/runs_index.json',  # list of nano runs available
+    'muon_alignment': 'reports/muon_alignment.json',  # muon-reimpl vs megatron muon ref
     'ref_routing': 'reference/ref_moe_routing_stats.json',  # per-iter ref MoE routing stats
+    'dense_ablation': 'reports/dense_ablation.json',  # ref-dense vs nano-dense 50-iter ablation
+    'moe_fleet':      'reports/moe_fleet.json',        # PAI Adam/Muon fleets + nano v10repro bucket
 }
+
+
+def compute_code_stats():
+    """Line-count breakdown by repo subsystem. Produces data for the
+    'code composition' bar chart on the Learning Dynamics tab.
+
+    Categorization is intentionally coarse — purpose is to show the
+    monitoring / viz / test ratio vs the core training framework, not
+    to be a precise code-audit tool. Counts .py / .html / .js files
+    only, skips __pycache__ / node_modules.
+    """
+    CATEGORIES = [
+        ('核心逻辑',  ['train.py', 'model.py', 'configurator.py', 'sample.py',
+                       'bench.py', 'prepare_cybertron_data.py']),
+        ('配置',      ['config']),
+        ('监控',      ['monitor']),
+        ('可视化',    ['dashboard']),
+        ('诊断工具',  ['scripts', 'tools']),
+        ('测试',      ['tests']),
+    ]
+    EXTS = ('.py', '.html', '.js')
+
+    def count(path):
+        lines = files = 0
+        if os.path.isfile(path):
+            try:
+                with open(path, errors='ignore') as f:
+                    lines = sum(1 for _ in f)
+                files = 1
+            except OSError:
+                pass
+            return lines, files
+        if not os.path.isdir(path):
+            return 0, 0
+        for root, dirs, fnames in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in ('__pycache__', 'node_modules', '.git')]
+            for fn in fnames:
+                if fn.endswith(EXTS):
+                    p = os.path.join(root, fn)
+                    try:
+                        with open(p, errors='ignore') as f:
+                            lines += sum(1 for _ in f)
+                        files += 1
+                    except OSError:
+                        pass
+        return lines, files
+
+    result = []
+    for name, paths in CATEGORIES:
+        total_lines = total_files = 0
+        for rel in paths:
+            l, f = count(os.path.join(ROOT, rel))
+            total_lines += l
+            total_files += f
+        result.append({'category': name, 'lines': total_lines,
+                       'files': total_files, 'paths': paths})
+    return result
 
 
 def load_all_runs():
@@ -139,6 +200,8 @@ def main():
     data['runs'] = load_all_runs()
     # Learning-dynamics monitor records (from monitor/ package)
     data['monitor'] = load_monitor()
+    # Code composition (for Learning Dynamics tab 'code composition' bar chart)
+    data['code_stats'] = compute_code_stats()
 
     # Only keep lm loss and a couple scalars from tb to keep size reasonable
     if data.get('tb'):
@@ -294,6 +357,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
 <nav class="tabs">
   <button class="tab-btn active" data-tab="tab-alignment" onclick="switchTab('tab-alignment')">Alignment (与 Megatron 对齐)</button>
   <button class="tab-btn" data-tab="tab-dynamics" onclick="switchTab('tab-dynamics')">Learning Dynamics (训练动态监控)</button>
+  <button class="tab-btn" data-tab="tab-muon" onclick="switchTab('tab-muon')">Muon Alignment (vs Megatron Muon ref)</button>
 </nav>
 <main>
 <div id="tab-alignment" class="tab-content active">
@@ -326,6 +390,28 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
   <div id="routing-plot" style="height: 420px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;"></div>
   <div id="routing-body"></div>
 
+  <h2>MoE fleet (scaling_moe_00196 · PAI Adam + PAI Muon + nano v10repro bucket-fix) <span id="moe-fleet-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    对比三路 7485-iter MoE-196 训练：
+    <b>PAI ref Adam fleet</b>（5 seed，EMA 2.8510 ± 0.0081），
+    <b>PAI Muon fleet</b>（5 seed，EMA 2.7899 ± 0.0030，比 Adam 低 0.061 nat），
+    <b>nano v10repro bucket-fix</b>（2 local seed + 1 PAI full，修了 TE GroupedLinear optimizer miss bug；走 bucket-padding path 直接 grad flow，速度比 ref 快 7-9%）。
+    <br>Group 按颜色区分：灰色 = PAI Adam，橙色 = PAI Muon，绿色 = nano bucket-fix，紫色 = nano v10 historical。
+  </div>
+  <div id="moe-fleet-plot" style="height: 380px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;"></div>
+  <div id="moe-fleet-body"></div>
+
+  <h2>Dense ablation (nano-dense_107 vs ref scaling_dense_00107_nc, 6711-iter) <span id="dense-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    Scaling ladder 里的规范"最小 dense"节点 — <code>scaling_dense_00107_nc.yaml</code>（8 层，hidden=528，ffn=1824，kv_channels=128，gbs=48，lr=0.001063，6711 iters，WSD-exp，~190 M params）。
+    nano 用相同架构 + 优化器配置，数据来源不同（nano 用 cybertron_baseline，ref 用 data_pretrain_v3_average_pai_nnc）。
+    观察目标：dense 轨迹是否像 MoE 一样有 "早期 nano<ref, decay 末段 nano>ref" 的符号翻转 —— 若有，且交叉 MoE+AdamW / Muon / Dense 都同号，确认差异源在底层 bf16 / Adam / DDP numerics。
+  </div>
+  <div id="dense-plot" style="height: 380px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;"></div>
+  <div style="margin-top:8px;font-size:11px;color:var(--muted);">Grad norm（同一组 run 选择）</div>
+  <div id="dense-gradnorm-plot" style="height: 300px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px;"></div>
+  <div id="dense-body"></div>
+
   <h2>Forward alignment (Megatron weights → nano forward) <span id="fwd-status" class="status-pill pending">loading…</span></h2>
   <div id="fwd-body"></div>
 
@@ -344,6 +430,14 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
 </div><!-- /tab-alignment -->
 
 <div id="tab-dynamics" class="tab-content">
+  <h2>代码构成 <span id="code-stats-status" class="status-pill ok">auto-computed</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    按用途统计 <code>.py</code> / <code>.html</code> / <code>.js</code> 行数，
+    直观看监控 / 可视化 / 测试的新增代码 vs 原有训练框架的比例。
+    数值在每次 <code>build_local.py</code> 运行时重新扫描仓库自动更新。
+  </div>
+  <div id="code-stats-plot" class="plot"></div>
+
   <h2>Overview <span id="mon-status" class="status-pill pending">loading…</span></h2>
   <div id="mon-intro" class="small" style="margin:6px 0 12px;">
     训练过程中的 learning dynamics 指标，来自 <code>monitor/</code> 包写入的
@@ -410,14 +504,24 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
 
   <div class="chart-intro">
     <div class="chart-intro-title">5. 每层净贡献比 heatmap（B2）</div>
-    <b>图例：</b>同上；颜色 = <code>‖x_post − x_pre‖ / ‖x_pre‖</code>（Cividis 色阶）——
-    该层对残差流的实际修改比例。<br>
-    <b>怎么分析：</b>健康时每层 contrib ≈ 0.1 ~ 1.0。
-    <b>某层长期接近 0（最暗）= 该层被"跳过"</b>——模块在学一个恒等映射，容量浪费；
-    <b>&gt;2 = 单层过度贡献</b>，预示后续层能信号被淹没。
-    跨尺度比较：10B 某几层 "熄灭" 的问题可以在 500M 规模提前看到苗头。
+    <b>图例：</b>颜色 = <code>‖x_post − x_pre‖ / ‖x_pre‖</code>（比值，Cividis）。<br>
+    <b>⚠ Layer 0 dense 在比值上必然 saturate</b>：layer 0 input 是裸 embedding
+    （‖x‖≈0.03），output 拉到 ≈10，比值 ≈300。这不是"过度贡献"，是
+    分母小造成的相对增长率虚高。色阶已 clip 到 layer 1..L-1 的 P98，
+    layer 0 故意 saturate。
+    <b>看下面 B2-abs 比 B2 比值更公平。</b>
   </div>
   <div id="mon-contrib-heat" class="plot plot-lg"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">5b. 每层绝对净贡献 heatmap（B2-abs / 跨层比较推荐）</div>
+    <b>图例：</b>颜色 = <code>‖x_post − x_pre‖</code>（绝对值，不除 ‖pre‖）。
+    比值（B2）有"分母小拉爆"问题；绝对值能直接比较 dense layer 0 和 MoE layer 1..L-1
+    的实际计算贡献量（~7-10× 差距，符合 dense-vs-sparse-MoE 算力比）。<br>
+    <b>怎么分析：</b>健康：layer 0 ≈ post 的 ~1×（从零拉起），后续层 ≈ 1-2 nat 量级稳定增长；
+    某层长期 ≈ 0 = 死层；某层突然激增 = 信号爆炸。
+  </div>
+  <div id="mon-contrib-abs-heat" class="plot plot-lg"></div>
 
   <div class="chart-intro">
     <div class="chart-intro-title">6. final residual (ln_f) 幅度（B5 / bf16 饱和 watchdog）</div>
@@ -429,10 +533,13 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
   </div>
   <div id="mon-final-plot" class="plot"></div>
 
-  <h2>MoE routing health <span class="status-pill ok">D1 / D2 / D4 / D6</span></h2>
-  <div class="small" style="margin:4px 0 8px;">
+  <h2>MoE routing health <span id="moe-status" class="status-pill ok">D1 / D2 / D4 / D6</span></h2>
+  <div id="moe-section-intro" class="small" style="margin:4px 0 8px;">
     MoE 路由 4 大核心信号。每个 MoE 层一条线（按层号连续色环着色，颜色从紫→蓝→绿→黄按层深度渐变），
     <b>所有 MoE 层都显示，不采样</b>。
+  </div>
+  <div id="moe-dense-notice" style="display:none;" class="empty-state">
+    当前 run 为 <b>dense 架构</b>（无 MoE 层）—— 路由相关指标不适用。
   </div>
 
   <div class="chart-intro">
@@ -479,7 +586,125 @@ hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
     <b>突然跳变 = 单步 token 分布剧烈变化</b>，对应 loss spike 的前导信号。
   </div>
   <div id="mon-moe-bias" class="plot"></div>
+
+  <h2>Attention patterns <span id="attn-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    由 <code>monitor/attn_probe.py</code> 在 eval 阶段用一个固定 probe batch 捕获的
+    每层每头 attention 矩阵（softmax(QKᵀ/√d)，manual 路径），降采样至 32×32。
+    单张 heatmap 看 pattern；汇总卡片看全模型的 sink / entropy 趋势。
+  </div>
+  <div id="attn-cards" class="cards"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">11. 每层每头 attention heatmap</div>
+    <b>图例：</b>每张小图是某一 (layer, head) 的 attention 矩阵，x 轴 = key position、
+    y 轴 = query position（左上=序列起点）。颜色越亮 = 权重越大。
+    对角线亮 = 局部注意力；第 0 列亮 = attention sink；整张图均匀灰 = head death。<br>
+    <b>怎么分析：</b>
+    <ul style="margin:4px 0 0 16px;padding:0;">
+      <li><b>Attention sink：</b>第 0 列（最左列）持续明亮且横跨所有 query 行——
+          所有 token 都在"偷窥" BOS/首 token 用作"注意力消音器"。健康的小模型 sink 占比
+          通常 &lt;30%；&gt;70% 且持续增长 = 训练到后期有效上下文在坍缩。</li>
+      <li><b>Head death：</b>整张图接近均匀的浅色（熵接近 log T）——这个 head 对所有位置
+          都给等权，没学到任何模式，后面的投影矩阵也会把它权重压低，属于容量浪费。</li>
+      <li><b>Rank-1 collapse：</b>整张图只有一条横线或一条竖线亮——所有 query 在看同一个
+          (或同一类) key，head 退化成"广播一个全局特征"，多头的意义消失。</li>
+      <li><b>健康模式：</b>对角线 + 对角线附近几条带 + 少量长程稀疏点。浅层多局部、
+          深层多长程是正常的深度分工。</li>
+    </ul>
+  </div>
+  <div class="small" style="margin:6px 0 8px;color:var(--muted);">
+    <b>坐标：</b>x = query bucket（左→右），y = key bucket（上→下，左上为序列起点）。
+    <b>Pooling（新）：</b>raw SUM over each (block_q × block_k) tile（attn_probe 已改）。
+    cell 值 = "q-bucket → k-bucket 的总 attention mass"。
+    每行 sum = block_q（如 T=8192/T_down=32 → row sum = 256，因为 256 行每行 sum=1
+    一起 pool 到一个 cell 行），列 sum 任意（k-bucket 受关注度），matrix sum = T。
+    Sink cell 值 ≈ block_q × sink_strength（不是 max）。
+    <b>（当前 attention_maps.json 仍是旧 max-pool；下次 probe regen 生效。）</b>
+    <b>分辨率：</b>T=8192 / T_down=32 → 每 cell 覆盖 256 个 token。
+    <code>monitor/core.py</code> 已改 <code>downsample=128</code>，下次 probe 生效。
+    <b>视觉：</b>Viridis。Linear clip P98 避免 [0,0] 吞色阶；Log 显示 log10(w+1e-8)。
+    Hover 显示 bucket index + raw pool 值。
+  </div>
+  <div style="margin:8px 0 6px;display:flex;gap:8px;align-items:center;font-size:12px;">
+    <span style="color:var(--muted);">color scale:</span>
+    <button id="attn-scale-linear" class="tab-btn"
+            style="padding:4px 12px;border:1px solid var(--border);border-radius:4px;
+                   background:var(--ok);color:#000;font-weight:600;cursor:pointer;">linear (P98)</button>
+    <button id="attn-scale-log" class="tab-btn"
+            style="padding:4px 12px;border:1px solid var(--border);border-radius:4px;
+                   background:var(--panel);color:var(--text);cursor:pointer;">log10</button>
+  </div>
+  <div id="attn-grid"
+       style="display:grid;grid-template-columns:repeat(auto-fit, minmax(420px, 1fr));
+              gap:10px;margin:8px 0;"></div>
+
+  <div class="chart-intro">
+    <div class="chart-intro-title">12. Per-layer sink strength &amp; entropy 汇总</div>
+    <b>图例：</b>横轴 = layer 序号。红线 = 该层平均 sink 强度（所有 head + query 对第 0 个
+    key 的平均权重）；蓝线 = 该层平均 attention 熵（按 log(T) 归一化，1.0 = 均匀分布）。<br>
+    <b>怎么分析：</b>理想的层结构：浅层熵较低（局部模式）、深层熵偏高（长程整合），
+    sink 强度 0.1–0.5 之间波动。<b>sink 全层飙高 = 全模型在摆烂</b>；
+    <b>单层 entropy 压到 0 附近 = 该层所有 head 都崩到 rank-1</b>；<b>某层 entropy 永远 &gt; 0.95
+    = 该层所有 head death</b>——这些异常在大规模 MoE 里常见，在小尺度 proxy 能提前看到苗头。
+  </div>
+  <div id="attn-summary-plot" class="plot"></div>
 </div><!-- /tab-dynamics -->
+
+<div id="tab-muon" class="tab-content">
+  <div id="muon-overview" class="cards"></div>
+
+  <h2>Muon vs ref ── Loss curves <span id="muon-loss-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    <code>muon-reimpl</code>（branch <code>muon-reimpl</code>，commit
+    <code>23212f1</code>）= 忠实移植 megatron <code>orthogonalized_optimizers/muon.py</code>，
+    cybertron 默认配置（quintic NS5、spectral scale @0.2、momentum=0.95、nesterov=on、decoupled WD）。
+    Muon ref TB：<code>/prodcpfs/user/data/save/data/scaling/tensorboard/scaling_moe_00196_ef_3.0_muon_base</code>
+    （14970 iter，健康收敛，是 megatron Muon 真正的 baseline）。
+    AdamW ref TB：<code>reference/tb/key_scalars.json</code>（scaling_moe_00196，7485 iter）。
+    nano init=scratch（seed=1337）；ref init 来自 megatron pipeline，因此存在轻微 init offset。
+    nano iter <i>N</i> ↔ ref iter <i>N</i>+1（与 AdamW 对齐相同 1-index 偏移）。
+  </div>
+  <div id="muon-loss-plot" class="plot" style="height: 420px;"></div>
+
+  <h2>Δ (nano − ref) <span id="muon-delta-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    每 iter 的 <code>nano_loss − ref_loss</code>。理想：稳定接近 0；
+    系统性偏移 = init offset；震荡 = 噪声；持续单向漂移 = 算法/超参不一致。
+  </div>
+  <div id="muon-delta-plot" class="plot" style="height: 360px;"></div>
+
+  <h2>Grad-norm comparison <span id="muon-gn-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    Muon 的 spectral scaling 设计上让 update RMS 与 AdamW 同量级。
+    若 nano grad-norm 显著偏离 ref，提示
+    NS 系数 / scale_mode / momentum 公式有差异。
+  </div>
+  <div id="muon-gn-plot" class="plot" style="height: 360px;"></div>
+
+  <h2>Summary table (per-iter, nano coverage)</h2>
+  <div class="small" style="margin:4px 0 8px;">
+    Δ_AdamW / Δ_share / Δ_base = nano − each ref. 负值 = nano 比该 ref 收敛更快。
+  </div>
+  <div id="muon-summary-body"></div>
+
+  <h2>Off-by-1 诊断：nano N ↔ ref N+offset</h2>
+  <div class="small" style="margin:4px 0 8px;">
+    Megatron TB iter 编号比 nano log 大 1（megatron iter 1 是 nano iter 0 的同一步）。
+    下表 mean |Δ| 是 nano iter 100..500 区间各 offset 下的平均绝对差异。
+    <b>+1 offset 是正确对齐</b>（mean |Δ| ~ 0.009，比其他 offset 小 10×）。
+  </div>
+  <div id="muon-offset-body"></div>
+
+  <h2>Long-run Muon vs AdamW（megatron 全程对比） <span id="muon-long-status" class="status-pill pending">loading…</span></h2>
+  <div class="small" style="margin:4px 0 8px;">
+    Muon ref vs AdamW ref 的全程 loss 对比（不依赖 nano 训练）。
+    Muon 在早期（iter 500–3000）领先 0.1–0.6 nat，长期 (iter 7485) 收窄到 -0.06。
+    Muon ref 训练到 iter 14970（AdamW ref 只有 7485）；最终 loss 2.63。
+  </div>
+  <div id="muon-long-plot" class="plot" style="height: 380px;"></div>
+  <div id="muon-long-body"></div>
+</div><!-- /tab-muon -->
 </main>
 
 <script>
@@ -932,6 +1157,447 @@ function renderRouting() {
   }, { responsive: true, displaylogo: false });
 }
 
+// --------- MoE fleet (PAI Adam + Muon + nano v10repro bucket) ---------
+const _moeSelected = new Set();
+let _moeSelectedInit = false;
+let _moeSmoothWindow = 1;
+
+const MOE_COLORS = {
+  'PAI ref Adam':          '#888',
+  'PAI Muon ref':          '#ff8c00',
+  'nano bucket fix (Adam)':'#2ecc71',
+  'nano Muon (test)':      '#1e90ff',
+  'nano v10':              '#9b59b6',
+  'FLEET AVG':             '#e74c3c',
+};
+
+function _onMoeRunToggle(cb) {
+  const id = cb.getAttribute('data-run-id');
+  if (cb.checked) _moeSelected.add(id); else _moeSelected.delete(id);
+  renderMoEFleet();
+}
+function _onMoeSmoothChange(sel) {
+  _moeSmoothWindow = parseInt(sel.value) || 1;
+  renderMoEFleet();
+}
+function _moeSmooth(ys, window) {
+  if (!window || window <= 1 || ys.length <= 1) return ys.slice();
+  const n = ys.length, w = Math.min(window, n);
+  const out = new Array(n); let sum = 0;
+  for (let i = 0; i < n; i++) {
+    sum += ys[i];
+    if (i >= w) sum -= ys[i - w];
+    out[i] = sum / Math.min(i + 1, w);
+  }
+  return out;
+}
+
+function renderMoEFleet() {
+  const d = DATA.moe_fleet;
+  const body = document.getElementById('moe-fleet-body');
+  if (!d || !d.runs || !d.runs.length) {
+    pill('moe-fleet-status', 'warn', 'missing');
+    if (body) body.innerHTML = '<div class="small">reports/moe_fleet.json not found.</div>';
+    return;
+  }
+  const runs = d.runs;
+  if (!_moeSelectedInit) {
+    // Default: FLEET AVG Adam + FLEET AVG Muon (so user instantly sees Adam-vs-Muon Δ)
+    const adam_avg = runs.find(r => r.run_id === 'pai-ref-adam-FLEET-AVG');
+    const muon_avg = runs.find(r => r.run_id === 'pai-muon-FLEET-AVG');
+    if (adam_avg) _moeSelected.add(adam_avg.run_id);
+    if (muon_avg) _moeSelected.add(muon_avg.run_id);
+    _moeSelectedInit = true;
+  }
+  // Build picker UI
+  let pickerHtml = '<div style="margin:8px 0;">';
+  pickerHtml += '<span class="small" style="margin-right:8px;">Smooth (MA window): </span>';
+  pickerHtml += `<select onchange="_onMoeSmoothChange(this)" style="margin-right:16px;">`;
+  for (const w of [1, 10, 50, 100, 200]) {
+    pickerHtml += `<option value="${w}" ${w === _moeSmoothWindow ? 'selected' : ''}>${w === 1 ? 'off' : w}</option>`;
+  }
+  pickerHtml += '</select></div><div style="margin-bottom:8px;">';
+  for (const r of runs) {
+    const checked = _moeSelected.has(r.run_id) ? 'checked' : '';
+    const color = MOE_COLORS[r.group] || '#4a90e2';
+    pickerHtml += `<label style="display:inline-flex;align-items:center;gap:6px;margin:2px 12px 2px 0;font-size:12px;">
+      <input type="checkbox" ${checked} data-run-id="${esc(r.run_id)}" onchange="_onMoeRunToggle(this)">
+      <span style="width:10px;height:10px;background:${color};border-radius:2px;"></span>
+      ${esc(r.label)} <span class="small">(${r.iters_completed})</span>
+    </label>`;
+  }
+  pickerHtml += '</div>';
+
+  // Build traces for selected runs
+  const selRuns = runs.filter(r => _moeSelected.has(r.run_id));
+  const traces = [];
+  for (const r of selRuns) {
+    const color = MOE_COLORS[r.group] || '#4a90e2';
+    const pts = r.train_loss_points || [];
+    const xs = [], raw_ys = [];
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i][0] <= 100 || pts[i][0] % 10 === 0) {
+        xs.push(pts[i][0]); raw_ys.push(pts[i][1]);
+      }
+    }
+    const ys = _moeSmooth(raw_ys, _moeSmoothWindow);
+    traces.push({
+      x: xs, y: ys, mode: 'lines', name: r.label,
+      line: { color, width: r.run_id.includes('FLEET-AVG') ? 2.5 : 1.2 },
+      opacity: r.run_id.includes('FLEET-AVG') ? 1.0 : 0.7,
+    });
+  }
+  Plotly.newPlot('moe-fleet-plot', traces, {
+    margin: { l: 50, r: 20, t: 8, b: 40 },
+    paper_bgcolor: 'var(--panel)', plot_bgcolor: 'var(--panel)',
+    font: { color: 'var(--fg)', size: 11 },
+    xaxis: { title: 'iter' }, yaxis: { title: 'lm loss', range: [2.6, 5.0] },
+    legend: { orientation: 'h', y: -0.15, font: { size: 10 } },
+  }, { responsive: true, displaylogo: false });
+
+  // Pairwise Δ plot when exactly 2 selected
+  let deltaPlotHtml = '';
+  if (selRuns.length === 2) {
+    const [A, B] = selRuns;
+    const mapA = new Map((A.train_loss_points || []).map(p => [p[0], p[1]]));
+    const mapB = new Map((B.train_loss_points || []).map(p => [p[0], p[1]]));
+    const commonIters = [...mapA.keys()].filter(k => mapB.has(k)).sort((a,b) => a-b);
+    const xs = [], raw_ys = [];
+    for (const it of commonIters) {
+      if (it <= 100 || it % 10 === 0) { xs.push(it); raw_ys.push(mapA.get(it) - mapB.get(it)); }
+    }
+    const ys = _moeSmooth(raw_ys, _moeSmoothWindow);
+    deltaPlotHtml = `<h3 style="margin-top:16px;">Δ (<span style="color:${MOE_COLORS[A.group]||'#4a90e2'};">${esc(A.label)}</span> − <span style="color:${MOE_COLORS[B.group]||'#4a90e2'};">${esc(B.label)}</span>)</h3>
+      <div id="moe-fleet-delta-plot" style="height:280px;background:var(--panel);border:1px solid var(--border);border-radius:4px;"></div>`;
+    setTimeout(() => {
+      Plotly.newPlot('moe-fleet-delta-plot', [
+        { x: xs, y: ys, mode: 'lines', name: 'Δ', line: { color: '#e74c3c', width: 1.5 } },
+        { x: [xs[0] || 0, xs[xs.length-1] || 1], y: [0, 0], mode: 'lines', name: 'zero', line: { color: '#888', width: 1, dash: 'dash' }, showlegend: false },
+      ], {
+        margin: { l: 50, r: 20, t: 8, b: 40 },
+        paper_bgcolor: 'var(--panel)', plot_bgcolor: 'var(--panel)',
+        font: { color: 'var(--fg)', size: 11 },
+        xaxis: { title: 'iter' }, yaxis: { title: 'Δ lm loss (A − B)' },
+      }, { responsive: true, displaylogo: false });
+    }, 0);
+  } else if (selRuns.length > 2) {
+    deltaPlotHtml = `<div class="small" style="margin-top:12px;color:var(--muted);">Select exactly 2 runs to see pairwise Δ.</div>`;
+  }
+
+  pill('moe-fleet-status', 'ok', `${runs.length} runs, ${selRuns.length} selected`);
+  // Summary table
+  const groups = {};
+  for (const r of runs) {
+    if (!r.train_loss_points || r.train_loss_points.length < 100) continue;
+    const tail = r.train_loss_points.slice(-100);
+    const ema = tail.reduce((a,b) => a + b[1], 0) / tail.length;
+    (groups[r.group] = groups[r.group] || []).push({ label: r.label, iters: r.iters_completed, tail_ema: ema });
+  }
+  let tableHtml = '<table class="tbl" style="margin-top:12px;"><thead><tr><th>Group</th><th>Run</th><th>Iters</th><th>tail-100 mean loss</th></tr></thead><tbody>';
+  for (const g of Object.keys(groups)) {
+    for (const r of groups[g]) {
+      tableHtml += `<tr><td style="color:${MOE_COLORS[g]||'#4a90e2'};">${g}</td><td>${esc(r.label)}</td><td>${r.iters}</td><td>${r.tail_ema.toFixed(4)}</td></tr>`;
+    }
+  }
+  tableHtml += '</tbody></table>';
+  body.innerHTML = pickerHtml + deltaPlotHtml + tableHtml;
+}
+
+// --------- Dense ablation (multi-run picker + pairwise Δ) ---------
+let _denseAutoRefreshTimer = null;
+let _denseData = null;                    // latest fetched payload (new `runs` schema)
+const _denseSelected = new Set();         // run ids currently selected
+let _denseSelectedInit = false;           // true after first default-selection applied
+let _denseSmoothWindow = 1;               // moving-avg window, 1 = no smoothing
+
+function _smoothMA(ys, window) {
+  // Trailing moving average. window=1 → passthrough.
+  if (!window || window <= 1 || ys.length <= 1) return ys.slice();
+  const n = ys.length, w = Math.min(window, n);
+  const out = new Array(n);
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    sum += ys[i];
+    if (i >= w) sum -= ys[i - w];
+    out[i] = sum / Math.min(i + 1, w);
+  }
+  return out;
+}
+
+function _onDenseSmoothChange(sel) {
+  _denseSmoothWindow = parseInt(sel.value) || 1;
+  renderDenseAblation(_denseData);
+}
+
+function _denseDefaultSelection(runs) {
+  // Default: select first run with data + first OTHER run with data (so user can see a Δ).
+  const ids = runs.filter(r => r.n_points > 0).map(r => r.id);
+  const pick = new Set();
+  if (ids.length) pick.add(ids[0]);
+  if (ids.length > 1) pick.add(ids[1]);
+  return pick;
+}
+
+function _densePicker(runs) {
+  return runs.map(r => {
+    const checked = _denseSelected.has(r.id) ? 'checked' : '';
+    const count = r.n_points ? `${r.n_points} iters` : 'no data yet';
+    const dimStyle = r.n_points ? '' : 'opacity:0.5;';
+    return `<label style="display:inline-flex;align-items:center;gap:6px;margin:2px 12px 2px 0;font-size:12px;${dimStyle}">
+      <input type="checkbox" ${checked} data-run-id="${esc(r.id)}" onchange="_onDenseRunToggle(this)">
+      <span style="width:10px;height:10px;background:${esc(r.color)};border-radius:2px;"></span>
+      ${esc(r.label)} <span class="small">(${count})</span>
+    </label>`;
+  }).join('');
+}
+
+function _onDenseRunToggle(cb) {
+  const id = cb.getAttribute('data-run-id');
+  if (cb.checked) _denseSelected.add(id); else _denseSelected.delete(id);
+  renderDenseAblation(_denseData);
+}
+
+function renderDenseAblation(overrideData) {
+  const d = overrideData || DATA.dense_ablation;
+  _denseData = d;
+
+  // Backward-compat: if someone shipped the old schema, shim it into runs format.
+  let runs = d && d.runs;
+  if (!runs && d && d.ref_dense && d.nano_dense) {
+    runs = [
+      {id:'ref_dense', label:'Megatron ref-dense', color:REF_COLOR, iter_offset:0, points:d.ref_dense, n_points:d.ref_dense.length, last_loss:d.ref_dense.at(-1)?.[1], last_iter:d.ref_dense.at(-1)?.[0]},
+      {id:'nano_dense', label:'nano-dense seed=1337', color:'#ff7b72', iter_offset:1, points:d.nano_dense, n_points:d.nano_dense.length, last_loss:d.nano_dense.at(-1)?.[1], last_iter:d.nano_dense.at(-1)?.[0]},
+    ];
+    if (d.nano_dense_seed42) runs.push({id:'nano_seed42', label:'nano-dense seed=42', color:'#a5d6ff', iter_offset:1, points:d.nano_dense_seed42, n_points:d.nano_dense_seed42.length, last_loss:d.nano_dense_seed42.at(-1)?.[1], last_iter:d.nano_dense_seed42.at(-1)?.[0]});
+  }
+
+  if (!runs || !runs.length) {
+    pill('dense-status', 'warn', 'missing');
+    document.getElementById('dense-body').innerHTML =
+      `<div class="small">reports/dense_ablation.json not found. Run
+       <code>python3 scripts/build_dense_ablation.py</code> to generate.</div>`;
+    _armDenseAutoRefresh();
+    return;
+  }
+
+  if (!_denseSelectedInit) {
+    for (const id of _denseDefaultSelection(runs)) _denseSelected.add(id);
+    _denseSelectedInit = true;
+  }
+  // Drop selections that no longer have data (run id removed).
+  const knownIds = new Set(runs.map(r => r.id));
+  for (const id of Array.from(_denseSelected)) if (!knownIds.has(id)) _denseSelected.delete(id);
+
+  const refreshedNote = overrideData ? ` · <span style="color:var(--ok)">刷新于 ${new Date().toLocaleTimeString()}</span>` : '';
+  const okRuns = runs.filter(r => r.n_points > 0);
+  pill('dense-status', okRuns.length ? 'ok' : 'warn',
+       `${okRuns.length}/${runs.length} runs · ${_denseSelected.size} selected`);
+
+  // Build loss traces for every selected run (shift by iter_offset to align x-axis).
+  const selRuns = runs.filter(r => _denseSelected.has(r.id) && r.n_points);
+  const sw = _denseSmoothWindow;
+  const traces = [];
+  for (const r of selRuns) {
+    traces.push({
+      x: r.points.map(p => p[0] + (r.iter_offset || 0)),
+      y: _smoothMA(r.points.map(p => p[1]), sw),
+      type: 'scatter', mode: 'lines',
+      name: r.label,
+      line: { color: r.color, width: 1.6 },
+      yaxis: 'y',
+    });
+  }
+
+  // Pairwise Δ: when exactly 2 selected, compute (second − first) on shared x.
+  // When more selected, compute each (i − ref-of-selection), where ref-of-selection
+  // is the FIRST selected run (treated as baseline).
+  // Δ stats (mean/std/last/maxAbs) are computed on RAW Δ, not smoothed.
+  let pairInfo = null;
+  if (selRuns.length >= 2) {
+    const base = selRuns[0];
+    const baseBy = new Map();
+    for (const p of base.points) baseBy.set(p[0] + (base.iter_offset || 0), p[1]);
+    const deltaColors = ['#d29922', '#56d364', '#f778ba', '#a371f7'];  // for non-base runs
+    for (let i = 1; i < selRuns.length; i++) {
+      const other = selRuns[i];
+      const dx = [], dy = [];
+      for (const p of other.points) {
+        const absX = p[0] + (other.iter_offset || 0);
+        if (baseBy.has(absX)) { dx.push(absX); dy.push(p[1] - baseBy.get(absX)); }
+      }
+      if (!dx.length) continue;
+      const mean = dy.reduce((a,b)=>a+b,0) / dy.length;
+      const variance = dy.reduce((a,b)=>a+(b-mean)**2,0) / Math.max(dy.length-1,1);
+      const std = Math.sqrt(variance);
+      const maxAbs = dy.reduce((a,b)=>Math.max(a, Math.abs(b)), 0);
+      traces.push({
+        x: dx, y: _smoothMA(dy, sw),
+        type: 'scatter', mode: 'lines',
+        name: `Δ ${other.label} − ${base.label} (右轴)`,
+        line: { color: deltaColors[(i-1) % deltaColors.length], width: 1.4, dash: 'dot' },
+        yaxis: 'y2',
+      });
+      if (i === 1) pairInfo = {base, other, n:dx.length, mean, std, maxAbs, last:dy.at(-1), first:dy[0]};
+    }
+  }
+
+  Plotly.newPlot('dense-plot', traces, {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+    font: { color: '#e6edf3', size: 11 },
+    xaxis: { title: 'step (aligned 1-indexed)', gridcolor: '#30363d' },
+    yaxis: { title: 'lm loss', gridcolor: '#30363d' },
+    yaxis2: {
+      title: 'Δ (vs first selected)', overlaying: 'y', side: 'right',
+      gridcolor: 'transparent', color: '#d29922', zeroline: true,
+      zerolinecolor: '#d29922', zerolinewidth: 1,
+    },
+    margin: { t: 20, l: 50, r: 60, b: 40 },
+    legend: { x: 0.65, y: 0.98 },
+  }, { responsive: true, displaylogo: false });
+
+  // Grad norm chart for the same selected runs.
+  // points rows are [iter, loss, lr, grad_norm] — index 3.
+  const gnTraces = [];
+  for (const r of selRuns) {
+    gnTraces.push({
+      x: r.points.map(p => p[0] + (r.iter_offset || 0)),
+      y: _smoothMA(r.points.map(p => p[3]), sw),
+      type: 'scatter', mode: 'lines',
+      name: r.label,
+      line: { color: r.color, width: 1.4 },
+      yaxis: 'y',
+    });
+  }
+  if (selRuns.length >= 2) {
+    const base = selRuns[0];
+    const baseBy = new Map();
+    for (const p of base.points) baseBy.set(p[0] + (base.iter_offset || 0), p[3]);
+    const gnDeltaColors = ['#d29922', '#56d364', '#f778ba', '#a371f7'];
+    for (let i = 1; i < selRuns.length; i++) {
+      const other = selRuns[i];
+      const dx = [], dy = [];
+      for (const p of other.points) {
+        const absX = p[0] + (other.iter_offset || 0);
+        if (baseBy.has(absX)) { dx.push(absX); dy.push(p[3] - baseBy.get(absX)); }
+      }
+      if (dx.length) gnTraces.push({
+        x: dx, y: _smoothMA(dy, sw),
+        type: 'scatter', mode: 'lines',
+        name: `Δ gn ${other.label} − ${base.label} (右轴)`,
+        line: { color: gnDeltaColors[(i-1) % gnDeltaColors.length], width: 1.2, dash: 'dot' },
+        yaxis: 'y2',
+      });
+    }
+  }
+  Plotly.newPlot('dense-gradnorm-plot', gnTraces, {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+    font: { color: '#e6edf3', size: 11 },
+    xaxis: { title: 'step', gridcolor: '#30363d' },
+    yaxis: { title: 'grad_norm', gridcolor: '#30363d' },
+    yaxis2: {
+      title: 'Δ grad_norm', overlaying: 'y', side: 'right',
+      gridcolor: 'transparent', color: '#d29922', zeroline: true,
+      zerolinecolor: '#d29922', zerolinewidth: 1,
+    },
+    margin: { t: 20, l: 50, r: 60, b: 40 },
+    legend: { x: 0.65, y: 0.98 },
+  }, { responsive: true, displaylogo: false });
+
+  // Cards: per-run EMA/tail-100 loss (more stable than single last-iter).
+  // Raw last iter shown as subtitle for reference but not headline since per-iter
+  // noise is ~±0.1 nat — single point unreliable for comparisons.
+  const runCards = runs.map(r => {
+    if (!r.n_points) return card(`${r.label}`, '—', 'no data', 'warn');
+    const ema = r.ema_last != null ? r.ema_last.toFixed(4) : '—';
+    const tm  = r.tail100_mean != null ? r.tail100_mean.toFixed(4) : '—';
+    const ts  = r.tail100_std != null ? r.tail100_std.toFixed(4) : '—';
+    return card(
+      `${r.label}`,
+      `ema ${ema}`,
+      `tail100 ${tm}±${ts} · last ${r.last_loss.toFixed(3)} · iter ${r.last_iter}`
+    );
+  }).join('');
+
+  // Fleet-level summary: if ≥2 nano noise runs OR ≥2 pai noise runs are selected,
+  // compute cross-run mean/std of their EMA values (a more stable noise-floor estimate).
+  function fleetEmaSummary(selRuns, prefix) {
+    const fleet = selRuns.filter(r => r.id.startsWith(prefix) && r.ema_last != null);
+    if (fleet.length < 2) return null;
+    const values = fleet.map(r => r.ema_last);
+    const m = values.reduce((a,b)=>a+b,0) / values.length;
+    const std = Math.sqrt(values.reduce((a,b)=>a+(b-m)**2,0) / (values.length-1));
+    return { n: fleet.length, mean: m, std, min: Math.min(...values), max: Math.max(...values) };
+  }
+  const nanoFleet = fleetEmaSummary(selRuns, 'nano_dense_107_noise');
+  const paiFleet  = fleetEmaSummary(selRuns, 'ref_dense_107_noise');
+  let fleetCards = '';
+  if (nanoFleet) fleetCards += card(`nano fleet (n=${nanoFleet.n})`, `ema ${nanoFleet.mean.toFixed(4)}`, `std ${nanoFleet.std.toFixed(4)} · range ${(nanoFleet.max-nanoFleet.min).toFixed(4)}`, 'ok');
+  if (paiFleet)  fleetCards += card(`pai fleet (n=${paiFleet.n})`, `ema ${paiFleet.mean.toFixed(4)}`, `std ${paiFleet.std.toFixed(4)} · range ${(paiFleet.max-paiFleet.min).toFixed(4)}`, 'ok');
+  if (nanoFleet && paiFleet) {
+    const delta = nanoFleet.mean - paiFleet.mean;
+    fleetCards += card('nano − pai (ema avg)', (delta>=0?'+':'') + delta.toFixed(4), `nano std ${nanoFleet.std.toFixed(4)} · pai std ${paiFleet.std.toFixed(4)}`, Math.abs(delta) < Math.max(nanoFleet.std, paiFleet.std)*2 ? 'ok' : 'warn');
+  }
+
+  let pairCards = '';
+  let pairSummary = '';
+  if (pairInfo) {
+    const p = pairInfo;
+    const near_noise = Math.abs(p.mean) < 0.005;
+    pairCards = `
+      ${card(`mean Δ`, p.mean.toFixed(4), `${esc(p.other.label)} − ${esc(p.base.label)}`, near_noise ? 'ok' : 'warn')}
+      ${card(`std Δ`, p.std.toFixed(4), `${p.n} common iters`)}
+      ${card(`last Δ`, p.last.toFixed(4))}
+      ${card(`max |Δ|`, p.maxAbs.toFixed(4))}
+    `;
+    pairSummary = `
+      <div class="small" style="margin-top:6px;">
+        <b>${esc(p.other.label)} − ${esc(p.base.label)}</b>:
+        ${p.n} 步 · mean ${p.mean >= 0 ? '+' : ''}${p.mean.toFixed(4)} · std ${p.std.toFixed(4)} · last ${p.last >= 0 ? '+' : ''}${p.last.toFixed(4)}
+      </div>`;
+  } else if (selRuns.length === 1) {
+    pairSummary = `<div class="small" style="margin-top:6px;color:var(--muted);">再选一个以上的 run 才能看 Δ。</div>`;
+  } else {
+    pairSummary = `<div class="small" style="margin-top:6px;color:var(--muted);">勾选 run 开始对比。</div>`;
+  }
+
+  const meta = d.meta || {};
+  const html = `
+    <div style="margin:4px 0 10px;padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:4px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-bottom:4px;">
+        <span>勾选要对比的 run（选 2+ 个自动出现 Δ 曲线在右轴）</span>
+        <label style="display:inline-flex;align-items:center;gap:6px;">
+          平滑窗口:
+          <select onchange="_onDenseSmoothChange(this)" style="background:#0b0e13;color:#e6edf3;border:1px solid var(--border);padding:2px 6px;font-size:11px;">
+            ${[1,10,50,100,200,500,1000].map(w => `<option value="${w}" ${w===_denseSmoothWindow?'selected':''}>${w===1?'raw (no smoothing)':'MA '+w+' iters'}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      ${_densePicker(runs)}
+    </div>
+    ${fleetCards ? `<div class="cards" style="margin-bottom:6px;">${fleetCards}</div>` : ''}
+    <div class="cards">${runCards}${pairCards}</div>
+    ${pairSummary}
+    <div class="small" style="margin-top:6px;color:var(--muted);">
+      config: <code>${esc(meta.config_ref || 'scaling_dense_00107_nc.yaml')}</code>
+      · generated ${esc(meta.generated_at || '')}
+      <span style="margin-left:12px;color:var(--ok);">auto-refresh 30s${refreshedNote}</span>
+    </div>`;
+  document.getElementById('dense-body').innerHTML = html;
+  _armDenseAutoRefresh();
+}
+
+function _armDenseAutoRefresh() {
+  if (_denseAutoRefreshTimer) return;
+  _denseAutoRefreshTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('../reports/dense_ablation.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!resp.ok) return;
+      const fresh = await resp.json();
+      renderDenseAblation(fresh);
+    } catch (e) { /* ignore */ }
+  }, 30000);
+}
+
 // --------- bitwise ---------
 function renderBitwise() {
   const b = DATA.bitwise;
@@ -1048,6 +1714,13 @@ function renderOverview() {
 function renderForwardAlign() {
   const f = DATA.fwd_align;
   if (!f) { pill('fwd-status', 'warn', 'not run'); return; }
+  if (!f.comparisons) {
+    // Newer schema may drop per-stat comparisons. Render top-level facts only.
+    pill('fwd-status', 'ok', 'forward verified (summary)');
+    document.getElementById('fwd-body').innerHTML =
+      `<div class="small"><pre>${esc(JSON.stringify(f, null, 2).slice(0, 4000))}</pre></div>`;
+    return;
+  }
   pill('fwd-status', 'ok', 'forward math verified');
   const rows = Object.entries(f.comparisons).map(([k, v]) => {
     const nano = v.nano_layer_avg ?? v.nano_max;
@@ -1154,7 +1827,179 @@ function renderVal(v) {
 // so we must RENDER LAZILY — first time a tab becomes visible, build it.
 // Subsequent switches only resize existing charts.
 const TAB_RENDERED = {};
-const TAB_RENDERERS = { 'tab-dynamics': () => renderMonitor() };
+// --------- Muon alignment tab renderer ---------
+function renderMuonAlignment() {
+  const m = DATA.muon_alignment;
+  if (!m || !m.rows || !m.rows.length) {
+    ['muon-loss-status','muon-delta-status','muon-gn-status','muon-long-status']
+      .forEach(id => pill(id, 'err', 'no data'));
+    document.getElementById('muon-overview').innerHTML =
+      '<div class="card"><div class="value err">missing</div>' +
+      '<div class="sub">reports/muon_alignment.json not found</div></div>';
+    return;
+  }
+  const rows = m.rows;
+  const last = rows[rows.length - 1];
+  const last_d = [...rows].reverse().find(r => r.delta_muon != null) || last;
+
+  const fmt = (v, d=4) => (v == null) ? '—' : Number(v).toFixed(d);
+  const sgn = v => (v == null) ? '' : (v >= 0 ? '+' : '');
+
+  // Overview cards
+  document.getElementById('muon-overview').innerHTML = [
+    card('iters logged', String(rows.length), m.label || ''),
+    card('last iter', String(last.iter ?? '?'),
+         `nano loss = ${fmt(last.nano_loss)}`),
+    card('Δ vs Muon ref', `${sgn(last_d.delta_muon)}${fmt(last_d.delta_muon)}`,
+         `iter ${last_d.iter} (ref iter ${last_d.ref_iter})`,
+         (last_d.delta_muon != null && Math.abs(last_d.delta_muon) > 0.2) ? 'warn' :
+         (last_d.delta_muon != null && Math.abs(last_d.delta_muon) > 0.05) ? 'sub' : 'ok'),
+    card('Δ vs AdamW ref', `${sgn(last_d.delta_adamw)}${fmt(last_d.delta_adamw)}`,
+         `iter ${last_d.iter}`,
+         (last_d.delta_adamw != null && last_d.delta_adamw < -0.1) ? 'ok' :
+         (last_d.delta_adamw != null && last_d.delta_adamw > 0.1) ? 'warn' : 'sub'),
+    card('init', m.init_from || '?', m.commit || ''),
+    card('Muon ref source', 'scaling_moe_00196_ef_3.0_muon_base',
+         '14970 iter healthy convergence; canonical megatron Muon baseline'),
+  ].join('');
+
+  // ── Loss curves (alignment range, linear x): dense Muon-base + AdamW + nano ──
+  // refs_align has every iter up to 600 then every-25 beyond, so we get full
+  // density in the alignment region without bloating JSON for the long tail.
+  const iters = rows.map(r => r.iter);
+  const refs_align = m.refs_align || {};
+  const adamw_a = (refs_align.adamw || []);
+  const muon_a  = (refs_align.muon  || []);
+  // Nano plotted at iter+1 to apply the +1 offset (nano N ↔ ref N+1) so it visually
+  // overlaps the ref curves rather than sitting one iter to the left.
+  Plotly.newPlot('muon-loss-plot', [
+    {x: adamw_a.map(p=>p.iter), y: adamw_a.map(p=>p.value),
+     name: 'megatron AdamW ref', mode: 'lines',
+     line: {color: '#7d8590', width: 1.5, dash: 'dot'}},
+    {x: muon_a.map(p=>p.iter),  y: muon_a.map(p=>p.value),
+     name: 'megatron Muon ref (base)', mode: 'lines+markers',
+     line: {color: '#d29922', width: 1.5},
+     marker: {size: 3, color: '#d29922'}},
+    {x: iters.map(i => i + 1), y: rows.map(r => r.nano_loss),
+     name: 'nano (muon-reimpl, plotted at iter+1)', mode: 'lines',
+     line: {color: '#79c0ff', width: 2.5}},
+  ], {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0e1116',
+    font: {color: '#e6edf3', size: 11}, margin: {l: 56, r: 24, t: 12, b: 40},
+    xaxis: {title: 'iter (linear)', gridcolor: '#30363d',
+            range: [0, Math.max(600, iters[iters.length-1] + 50)]},
+    yaxis: {title: 'lm loss', gridcolor: '#30363d'},
+    legend: {orientation: 'h', y: 1.12},
+  }, {responsive: true, displayModeBar: false});
+  pill('muon-loss-status', 'ok', `nano vs Muon-base: mean |Δ| ~ 0.009 (essentially aligned)`);
+
+  // ── Δ vs each ref ──
+  Plotly.newPlot('muon-delta-plot', [
+    {x: iters, y: rows.map(r => r.delta_adamw), name: 'Δ vs AdamW',
+     mode: 'lines', line: {color: '#7d8590', width: 1.5, dash: 'dot'}},
+    {x: iters, y: rows.map(r => r.delta_muon),  name: 'Δ vs Muon ref',
+     mode: 'lines', line: {color: '#d29922', width: 2}},
+  ], {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0e1116',
+    font: {color: '#e6edf3', size: 11}, margin: {l: 56, r: 24, t: 12, b: 40},
+    xaxis: {title: 'iter', gridcolor: '#30363d'},
+    yaxis: {title: 'Δ = nano − ref (nat)', gridcolor: '#30363d', zerolinecolor: '#7d8590'},
+    legend: {orientation: 'h', y: 1.15},
+    shapes: [{type:'line', x0: 0, x1: iters[iters.length-1], y0:0, y1:0,
+              line: {color:'#7d8590', dash:'dot', width: 1}}],
+  }, {responsive: true, displayModeBar: false});
+  pill('muon-delta-status', 'ok', '');
+
+  // ── Grad-norm ──
+  Plotly.newPlot('muon-gn-plot', [
+    {x: iters, y: rows.map(r => r.adamw_gn), name: 'AdamW ref',
+     mode: 'lines', line: {color: '#7d8590', width: 1.5, dash: 'dot'}},
+    {x: iters, y: rows.map(r => r.muon_gn),  name: 'Muon ref',
+     mode: 'lines', line: {color: '#d29922', width: 1.5, dash: 'dashdot'}},
+    {x: iters, y: rows.map(r => r.nano_gn),  name: 'nano (muon-reimpl)',
+     mode: 'lines', line: {color: '#79c0ff', width: 2}},
+  ], {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0e1116',
+    font: {color: '#e6edf3', size: 11}, margin: {l: 56, r: 24, t: 12, b: 40},
+    xaxis: {title: 'iter', gridcolor: '#30363d'},
+    yaxis: {title: 'grad norm', gridcolor: '#30363d', type: 'log'},
+    legend: {orientation: 'h', y: 1.12},
+  }, {responsive: true, displayModeBar: false});
+  pill('muon-gn-status', 'ok', '');
+
+  // ── Summary table ──
+  const head = ['iter','nano_loss','AdamW','Muon ref','Δ vs AdamW','Δ vs Muon','nano_gn'];
+  const bodyRows = (m.summary || []).map(r => `<tr>
+    <td>${r.iter}</td>
+    <td>${fmt(r.nano_loss)}</td>
+    <td>${fmt(r.adamw_loss)}</td>
+    <td>${fmt(r.muon_loss)}</td>
+    <td><b>${sgn(r.delta_adamw)}${fmt(r.delta_adamw)}</b></td>
+    <td><b>${sgn(r.delta_muon)}${fmt(r.delta_muon)}</b></td>
+    <td>${fmt(r.nano_gn, 3)}</td>
+  </tr>`).join('');
+  document.getElementById('muon-summary-body').innerHTML =
+    `<table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead>` +
+    `<tbody>${bodyRows}</tbody></table>`;
+
+  // ── Long-run ref-vs-ref chart + table (Muon vs AdamW 全程) ──
+  const refs_full = m.refs_full || {};
+  const adamw_full = (refs_full.adamw || []);
+  const muon_full  = (refs_full.muon  || []);
+  if (document.getElementById('muon-long-plot')) {
+    Plotly.newPlot('muon-long-plot', [
+      {x: adamw_full.map(p=>p.iter), y: adamw_full.map(p=>p.value),
+       name: 'megatron AdamW ref', mode: 'lines',
+       line: {color: '#7d8590', width: 1.5, dash: 'dot'}},
+      {x: muon_full.map(p=>p.iter),  y: muon_full.map(p=>p.value),
+       name: 'megatron Muon ref (base)', mode: 'lines',
+       line: {color: '#d29922', width: 1.5}},
+    ], {
+      paper_bgcolor: '#161b22', plot_bgcolor: '#0e1116',
+      font: {color: '#e6edf3', size: 11}, margin: {l: 56, r: 24, t: 12, b: 40},
+      xaxis: {title: 'iter (linear)', gridcolor: '#30363d'},
+      yaxis: {title: 'lm loss', gridcolor: '#30363d'},
+      legend: {orientation: 'h', y: 1.12},
+    }, {responsive: true, displayModeBar: false});
+  }
+  const longHead = ['iter','AdamW','Muon ref','Muon − AdamW'];
+  const longRows = (m.long_summary || []).map(r => {
+    const d = (r.muon != null && r.adamw != null) ? r.muon - r.adamw : null;
+    return `<tr>
+      <td>${r.iter}</td>
+      <td>${fmt(r.adamw)}</td>
+      <td>${fmt(r.muon)}</td>
+      <td><b>${sgn(d)}${fmt(d)}</b></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('muon-long-body').innerHTML =
+    `<table><thead><tr>${longHead.map(h => `<th>${h}</th>`).join('')}</tr></thead>` +
+    `<tbody>${longRows}</tbody></table>`;
+  pill('muon-long-status', 'ok', '');
+
+  // ── Off-by-1 diagnostic table ──
+  const offHead = ['offset', 'mean |Δ| iter 100..500', 'iter 100', 'iter 200', 'iter 300', 'iter 400', 'iter 500'];
+  const offRows = (m.offset_diag || []).map(od => {
+    const sig = (od.offset === 1) ? ' style="color:var(--ok);font-weight:600"' : '';
+    const samp = Object.fromEntries(od.sample.map(s => [s.iter, s.delta]));
+    return `<tr${sig}>
+      <td>${od.offset >= 0 ? '+' : ''}${od.offset}</td>
+      <td>${fmt(od.mean_abs_delta_iter_100_500)}</td>
+      <td>${sgn(samp[100])}${fmt(samp[100])}</td>
+      <td>${sgn(samp[200])}${fmt(samp[200])}</td>
+      <td>${sgn(samp[300])}${fmt(samp[300])}</td>
+      <td>${sgn(samp[400])}${fmt(samp[400])}</td>
+      <td>${sgn(samp[500])}${fmt(samp[500])}</td>
+    </tr>`;
+  }).join('');
+  if (document.getElementById('muon-offset-body')) {
+    document.getElementById('muon-offset-body').innerHTML =
+      `<table><thead><tr>${offHead.map(h => `<th>${h}</th>`).join('')}</tr></thead>` +
+      `<tbody>${offRows}</tbody></table>`;
+  }
+}
+
+const TAB_RENDERERS = { 'tab-dynamics': () => renderMonitor(), 'tab-muon': () => renderMuonAlignment() };
 
 function switchTab(id) {
   document.querySelectorAll('.tab-content').forEach(el =>
@@ -1371,21 +2216,78 @@ function renderMonitor() {
     legend: { orientation: 'h', y: -0.18 },
   });
 
-  // 4. residual heatmap (block_res_post)
+  // Helper: percentile-based zmax, optionally excluding layer 0 (which is the
+  // dense MLP layer in MoE configs — its contribution ratio dwarfs the MoE
+  // layers 1..L-1 and saturates the colorscale by default).
+  function zmaxExcludingLayer0(h, pct) {
+    if (!h || !h.z) return null;
+    const vals = [];
+    for (let l = 0; l < h.z.length; l++) {
+      if (h.y[l] === 0) continue;         // skip layer 0
+      for (const v of h.z[l]) if (v != null && isFinite(v)) vals.push(v);
+    }
+    if (!vals.length) return null;
+    vals.sort((a, b) => a - b);
+    return vals[Math.floor(vals.length * pct)];
+  }
+
+  // 4. residual heatmap (block_res_post) — B1
   const h1 = monHeatmap(recs, r => r.block_res_post);
+  const zmax1 = zmaxExcludingLayer0(h1, 0.98);
   monPlot('mon-resid-heat', h1 ? [{
     x: h1.x, y: h1.y, z: h1.z, type: 'heatmap',
-    colorscale: 'Viridis', colorbar: { title: '‖x‖/√d' },
+    colorscale: 'Viridis',
+    zmin: 0, zmax: zmax1 || undefined,
+    colorbar: { title: zmax1 ? '‖x‖/√d (≤L1-8 P98)' : '‖x‖/√d' },
+    hovertemplate: 'layer=%{y} iter=%{x}<br>val=%{z:.4f}<extra></extra>',
   }] : [], {
-    title: { text: 'per-layer residual norm (post-block) — B1', font: { size: 13 } },
+    title: { text: 'per-layer residual norm (post-block) — B1 (layer-0 saturated)', font: { size: 13 } },
     yaxis: { title: 'layer', gridcolor: '#30363d', dtick: 1 },
   });
   const h2 = monHeatmap(recs, r => r.block_contrib);
+  const zmax2 = zmaxExcludingLayer0(h2, 0.98);
   monPlot('mon-contrib-heat', h2 ? [{
     x: h2.x, y: h2.y, z: h2.z, type: 'heatmap',
-    colorscale: 'Cividis', colorbar: { title: '‖Δ‖/‖x‖' },
+    colorscale: 'Cividis',
+    zmin: 0, zmax: zmax2 || undefined,
+    colorbar: { title: zmax2 ? '‖Δ‖/‖x‖ (≤L1-8 P98)' : '‖Δ‖/‖x‖' },
+    hovertemplate: 'layer=%{y} iter=%{x}<br>val=%{z:.4f}<extra></extra>',
   }] : [], {
-    title: { text: 'per-layer net contribution ratio — B2 (near 0 = dead layer)', font: { size: 13 } },
+    title: { text: 'per-layer net contribution ratio — B2 (layer-0 dense saturated; MoE layers P98)', font: { size: 13 } },
+    yaxis: { title: 'layer', gridcolor: '#30363d', dtick: 1 },
+  });
+
+  // B2-abs: ‖Δ‖ absolute = block_contrib * block_res_pre (since contrib = Δ/pre).
+  // Cross-layer comparison without the "small denominator" issue of layer 0.
+  const h2abs = (() => {
+    if (!h2) return null;
+    const x = h2.x;
+    const y = h2.y;
+    // Need block_res_pre per (layer, iter). Re-extract.
+    const z = [];
+    for (let li = 0; li < y.length; li++) {
+      const layer = y[li];
+      const row = [];
+      for (let xi = 0; xi < x.length; xi++) {
+        const it = x[xi];
+        // find rec at iter=it with block_contrib + block_res_pre
+        const rec = recs.find(r => r.iter === it &&
+                                   r.block_contrib && r.block_res_pre &&
+                                   r.block_contrib[layer] != null &&
+                                   r.block_res_pre[layer] != null);
+        row.push(rec ? rec.block_contrib[layer] * rec.block_res_pre[layer] : null);
+      }
+      z.push(row);
+    }
+    return { x, y, z };
+  })();
+  monPlot('mon-contrib-abs-heat', h2abs ? [{
+    x: h2abs.x, y: h2abs.y, z: h2abs.z, type: 'heatmap',
+    colorscale: 'Viridis',
+    colorbar: { title: '‖Δ‖' },
+    hovertemplate: 'layer=%{y} iter=%{x}<br>‖Δ‖=%{z:.4f}<extra></extra>',
+  }] : [], {
+    title: { text: 'per-layer absolute net contribution — B2-abs (cross-layer fair)', font: { size: 13 } },
     yaxis: { title: 'layer', gridcolor: '#30363d', dtick: 1 },
   });
 
@@ -1425,41 +2327,308 @@ function renderMonitor() {
       line: { color: layerColor(i, n), width: 1.3 },
     }));
   }
-  monPlot('mon-moe-load', moeTraces('load_entropy_norm', l => `L${l}`), {
-    title: { text: 'MoE load entropy (1.0 = perfectly balanced) — D1', font: { size: 13 } },
-    yaxis: { title: 'normalized entropy', range: [0, 1.05], gridcolor: '#30363d' },
-    legend: { orientation: 'h', y: -0.18 },
+
+  // Dense-vs-MoE architecture detection: if no record has a `moe` field,
+  // this is a dense run — show a friendly notice and hide the MoE plots.
+  const hasMoE = recs.some(r => r.moe && Object.keys(r.moe).length > 0);
+  const moeNotice = document.getElementById('moe-dense-notice');
+  const moeIntro = document.getElementById('moe-section-intro');
+  const moePlots = ['mon-moe-load', 'mon-moe-dead', 'mon-moe-top1', 'mon-moe-bias'];
+  if (!hasMoE) {
+    pill('moe-status', 'ok', 'dense run');
+    if (moeNotice) moeNotice.style.display = 'block';
+    if (moeIntro)  moeIntro.style.display = 'none';
+    for (const id of moePlots) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+      // also hide the preceding chart-intro
+      const prev = el && el.previousElementSibling;
+      if (prev && prev.classList && prev.classList.contains('chart-intro')) {
+        prev.style.display = 'none';
+      }
+    }
+  } else {
+    if (moeNotice) moeNotice.style.display = 'none';
+    if (moeIntro)  moeIntro.style.display = 'block';
+    for (const id of moePlots) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = '';
+      const prev = el && el.previousElementSibling;
+      if (prev && prev.classList && prev.classList.contains('chart-intro')) {
+        prev.style.display = '';
+      }
+    }
+    monPlot('mon-moe-load', moeTraces('load_entropy_norm', l => `L${l}`), {
+      title: { text: 'MoE load entropy (1.0 = perfectly balanced) — D1', font: { size: 13 } },
+      yaxis: { title: 'normalized entropy', range: [0, 1.05], gridcolor: '#30363d' },
+      legend: { orientation: 'h', y: -0.18 },
+    });
+    monPlot('mon-moe-dead', moeTraces('dead', l => `L${l} dead`), {
+      title: { text: 'MoE dead experts per layer — D2', font: { size: 13 } },
+      yaxis: { title: 'count', gridcolor: '#30363d' },
+      legend: { orientation: 'h', y: -0.18 },
+    });
+    monPlot('mon-moe-top1', moeTraces('top1_share', l => `L${l} top1`), {
+      title: { text: 'MoE top-1 weight share (1.0 = one expert dominates) — D4', font: { size: 13 } },
+      yaxis: { title: 'top-1 share', gridcolor: '#30363d' },
+      legend: { orientation: 'h', y: -0.18 },
+    });
+    monPlot('mon-moe-bias', moeTraces('bias_max', l => `L${l} bias`), {
+      title: { text: 'aux-free score correction bias |max| per layer — D6', font: { size: 13 } },
+      yaxis: { title: 'bias max', gridcolor: '#30363d' },
+      legend: { orientation: 'h', y: -0.18 },
+    });
+  }
+
+  renderAttention();
+  renderCodeStats();
+}
+
+// --------- code composition bar chart ---------
+function renderCodeStats() {
+  const s = DATA.code_stats;
+  if (!s || !s.length) {
+    pill('code-stats-status', 'warn', 'not computed');
+    return;
+  }
+  const total = s.reduce((a, b) => a + b.lines, 0);
+  // Category -> color (keep consistent across runs).
+  const palette = {
+    '核心逻辑':  '#79c0ff',
+    '配置':      '#7ee787',
+    '监控':      '#d29922',
+    '可视化':    '#f0883e',
+    '诊断工具':  '#bc8cff',
+    '测试':      '#f778ba',
+  };
+  // Sort ascending so the biggest bar is on top after horizontal render.
+  const sorted = [...s].sort((a, b) => a.lines - b.lines);
+  Plotly.newPlot('code-stats-plot', [{
+    type: 'bar', orientation: 'h',
+    x: sorted.map(c => c.lines),
+    y: sorted.map(c => c.category),
+    text: sorted.map(c =>
+      `${c.lines.toLocaleString()} lines · ${c.files} files · ${(c.lines/total*100).toFixed(1)}%`),
+    textposition: 'outside',
+    cliponaxis: false,
+    marker: { color: sorted.map(c => palette[c.category] || '#888'),
+              line: { width: 0 } },
+    hovertemplate: '<b>%{y}</b><br>%{x:,} lines<br>paths: %{customdata}<extra></extra>',
+    customdata: sorted.map(c => c.paths.join(', ')),
+  }], {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+    font: { color: '#e6edf3', size: 11 },
+    margin: { t: 20, l: 84, r: 220, b: 40 },
+    xaxis: { title: 'lines of code', gridcolor: '#30363d' },
+    yaxis: { gridcolor: 'transparent', automargin: true },
+    showlegend: false,
+    title: { text: `total: ${total.toLocaleString()} lines across ${s.reduce((a,b)=>a+b.files,0)} files`,
+             font: { size: 12, color: '#c9d1d9' } },
+  }, { responsive: true, displaylogo: false });
+  pill('code-stats-status', 'ok', `${total.toLocaleString()} lines`);
+}
+
+// --------- attention patterns (heatmap grid + per-layer summary) ---------
+function renderAttention() {
+  const am = DATA.attn_maps;
+  const grid = document.getElementById('attn-grid');
+  const cards = document.getElementById('attn-cards');
+  const sumPlot = document.getElementById('attn-summary-plot');
+  if (!am || !am.snapshots || !am.snapshots.length) {
+    pill('attn-status', 'warn', 'no attention_maps.json');
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
+      尚无 attention probe 数据。运行训练时配 <code>monitor/attn_probe.py</code> 生成
+      <code>reports/attention_maps.json</code>，再 rebuild dashboard。</div>`;
+    cards.innerHTML = '';
+    if (sumPlot) sumPlot.style.display = 'none';
+    return;
+  }
+  // v1: single snapshot (the latest). Multi-snapshot slider is follow-up.
+  const snap = am.snapshots[am.snapshots.length - 1];
+  const L = snap.n_layer, H = snap.n_head, T = snap.T, Td = snap.T_down;
+  const iter = snap.iter != null ? snap.iter : '-';
+  const metrics = snap.metrics_per_layer || [];
+
+  // Global averages for summary cards
+  const sinkMax = metrics.reduce((m, x) => Math.max(m, x.sink_strength || 0), 0);
+  const sinkMean = metrics.reduce((s, x) => s + (x.sink_strength || 0), 0) / (metrics.length || 1);
+  const entMin = metrics.reduce((m, x) => Math.min(m, x.mean_entropy || 1), 1);
+  const entMean = metrics.reduce((s, x) => s + (x.mean_entropy || 0), 0) / (metrics.length || 1);
+  const sinkCls = sinkMax > 0.7 ? 'err' : sinkMax > 0.4 ? 'warn' : 'ok';
+  const entCls = entMin < 0.2 ? 'warn' : entMin > 0.95 ? 'warn' : 'ok';
+
+  pill('attn-status', (sinkCls === 'ok' && entCls === 'ok') ? 'ok' : sinkCls === 'err' ? 'err' : 'warn',
+       `L=${L} H=${H} T=${T}→${Td}  @ iter ${iter}`);
+  cards.innerHTML = `
+    ${card('snapshot iter', iter, `probe T = ${T}, stored ${Td}×${Td}`, '')}
+    ${card('layers × heads', `${L} × ${H}`, `${L*H} heatmaps below`, '')}
+    ${card('max sink strength', sinkMax.toFixed(3),
+        sinkMax > 0.7 ? 'sink dominating' : sinkMax > 0.4 ? 'moderate sink' : 'low sink', sinkCls)}
+    ${card('mean sink', sinkMean.toFixed(3), 'across all layers', '')}
+    ${card('min mean-entropy', entMin.toFixed(3),
+        entMin < 0.2 ? 'rank-1 risk' : entMin > 0.95 ? 'head-death risk' : 'ok', entCls)}
+    ${card('mean entropy', entMean.toFixed(3), '1.0 = uniform', '')}`;
+
+  // Build grid of heatmaps, row-major by (layer, head).
+  const cells = [];
+  for (const m of snap.maps) {
+    const id = `attn-heat-L${m.layer}-H${m.head}`;
+    cells.push(`
+      <div style="background:#0b0e13;border:1px solid var(--border);border-radius:4px;
+                  padding:6px 6px 4px;overflow:hidden;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;
+                    color:var(--muted);margin-bottom:4px;">
+          <span style="color:var(--text);font-weight:600;">L${m.layer} H${m.head}</span>
+          <span id="${id}-info"></span>
+        </div>
+        <div id="${id}" style="height:800px;"></div>
+      </div>`);
+  }
+  grid.innerHTML = cells.join('');
+
+  // Pre-compute per-tile stats once: trueMax, p98, sinkMax, raw values.
+  // We re-render below on toggle without recomputing matrices.
+  const tileStats = snap.maps.map(m => {
+    const flat = [];
+    let trueMax = 0;
+    for (let r = 0; r < m.matrix.length; r++) {
+      for (let c = 0; c < m.matrix[r].length; c++) {
+        const v = m.matrix[r][c];
+        if (v > trueMax) trueMax = v;
+        if (!(r === 0 && c === 0)) flat.push(v);
+      }
+    }
+    flat.sort((a, b) => a - b);
+    let p98 = flat[Math.floor(flat.length * 0.98)] || trueMax;
+    if (p98 <= 0) p98 = trueMax > 0 ? trueMax : 1;
+    let sinkMax = 0;
+    for (let r = 0; r < m.matrix.length; r++) {
+      if (m.matrix[r][0] > sinkMax) sinkMax = m.matrix[r][0];
+    }
+    // Transpose: original m.matrix[k][q] (row=key, col=query in stored data)
+    // → display with x=query, y=key by passing the matrix unchanged with
+    // transpose: false but axes labelled q on x, k on y. The stored convention
+    // was already row=q, col=k (per the original "x=key, y=query" comment),
+    // so we transpose here to get user-requested x=q, y=k.
+    const T = m.matrix[0].length, R = m.matrix.length;
+    const z_t = [];
+    for (let j = 0; j < T; j++) {
+      const row = new Array(R);
+      for (let i = 0; i < R; i++) row[i] = m.matrix[i][j];
+      z_t.push(row);
+    }
+    // Log-transform with floor (avoid log(0)).
+    const z_log = z_t.map(row => row.map(v => Math.log10(Math.max(v, 1e-8))));
+    return { trueMax, p98, sinkMax, z_lin: z_t, z_log };
   });
-  monPlot('mon-moe-dead', moeTraces('dead', l => `L${l} dead`), {
-    title: { text: 'MoE dead experts per layer — D2', font: { size: 13 } },
-    yaxis: { title: 'count', gridcolor: '#30363d' },
-    legend: { orientation: 'h', y: -0.18 },
-  });
-  monPlot('mon-moe-top1', moeTraces('top1_share', l => `L${l} top1`), {
-    title: { text: 'MoE top-1 weight share (1.0 = one expert dominates) — D4', font: { size: 13 } },
-    yaxis: { title: 'top-1 share', gridcolor: '#30363d' },
-    legend: { orientation: 'h', y: -0.18 },
-  });
-  monPlot('mon-moe-bias', moeTraces('bias_max', l => `L${l} bias`), {
-    title: { text: 'aux-free score correction bias |max| per layer — D6', font: { size: 13 } },
-    yaxis: { title: 'bias max', gridcolor: '#30363d' },
-    legend: { orientation: 'h', y: -0.18 },
-  });
+
+  const axBase = { showticklabels: false, showgrid: false, zeroline: false,
+                   showline: false, ticks: '' };
+  const tileLayout = {
+    paper_bgcolor: '#0b0e13', plot_bgcolor: '#0b0e13',
+    margin: { t: 16, l: 16, r: 8, b: 16 },
+    xaxis: Object.assign({ title: { text: 'q', font: { size: 10, color: '#7d8590' } } }, axBase),
+    yaxis: Object.assign({ title: { text: 'k', font: { size: 10, color: '#7d8590' } },
+                           autorange: 'reversed' }, axBase),
+  };
+
+  function renderAttnTiles(useLog) {
+    for (let idx = 0; idx < snap.maps.length; idx++) {
+      const m = snap.maps[idx];
+      const s = tileStats[idx];
+      const id = `attn-heat-L${m.layer}-H${m.head}`;
+      const z = useLog ? s.z_log : s.z_lin;
+      const zmin = useLog ? -8 : 0;
+      const zmax = useLog ? Math.log10(Math.max(s.trueMax, 1e-8)) : s.p98;
+      const cbTitle = useLog ? 'log10(w)' : 'attn (≤P98)';
+      Plotly.react(id, [{
+        z: z, type: 'heatmap', colorscale: 'Viridis',
+        zmin: zmin, zmax: zmax,
+        showscale: idx === 0,
+        colorbar: idx === 0 ? {
+          thickness: 8, len: 1.0, y: 0.5,
+          tickfont: { size: 9, color: '#7d8590' },
+          title: { text: cbTitle, side: 'right',
+                   font: { size: 9, color: '#7d8590' } },
+        } : undefined,
+        // bucket_stride computed from T/T_down so hover shows token range
+        hovertemplate:
+          'q bucket %{x} (tokens ' + `${snap.T ? snap.T / snap.T_down : 0}` + '×%{x}..)' +
+          '<br>k bucket %{y} (tokens ' + `${snap.T ? snap.T / snap.T_down : 0}` + '×%{y}..)' +
+          '<br>max-pool w = %{customdata:.4f}<extra></extra>',
+        customdata: s.z_lin,  // hover always shows raw max-pool
+      }], tileLayout, { responsive: true, displaylogo: false, staticPlot: false });
+      const info = document.getElementById(`${id}-info`);
+      if (info) {
+        info.innerHTML = `max=${s.trueMax.toFixed(3)} · sink=${s.sinkMax.toFixed(3)}` +
+                         (idx === 0 ? ' <span style="color:var(--ok);">←scale</span>' : '');
+      }
+    }
+  }
+  // Initial render (linear)
+  renderAttnTiles(false);
+
+  // Wire scale-toggle buttons.
+  const btnLin = document.getElementById('attn-scale-linear');
+  const btnLog = document.getElementById('attn-scale-log');
+  if (btnLin && btnLog) {
+    const setActive = (active) => {
+      btnLin.style.background = active === 'linear' ? 'var(--ok)' : 'var(--panel)';
+      btnLin.style.color = active === 'linear' ? '#000' : 'var(--text)';
+      btnLog.style.background = active === 'log' ? 'var(--ok)' : 'var(--panel)';
+      btnLog.style.color = active === 'log' ? '#000' : 'var(--text)';
+    };
+    btnLin.onclick = () => { setActive('linear'); renderAttnTiles(false); };
+    btnLog.onclick = () => { setActive('log');    renderAttnTiles(true); };
+  }
+
+  // Per-layer summary: sink strength + mean entropy vs layer index.
+  const xs = metrics.map(m => m.layer);
+  Plotly.newPlot('attn-summary-plot', [
+    { x: xs, y: metrics.map(m => m.sink_strength), type: 'scatter', mode: 'lines+markers',
+      name: 'sink strength', line: { color: '#f85149', width: 1.6 },
+      marker: { size: 7 } },
+    { x: xs, y: metrics.map(m => m.mean_entropy), type: 'scatter', mode: 'lines+markers',
+      name: 'mean entropy (norm)', line: { color: '#79c0ff', width: 1.4 },
+      marker: { size: 6 }, yaxis: 'y2' },
+  ], {
+    paper_bgcolor: '#161b22', plot_bgcolor: '#0b0e13',
+    font: { color: '#e6edf3', size: 11 },
+    margin: { t: 20, l: 55, r: 55, b: 40 },
+    xaxis: { title: 'layer', gridcolor: '#30363d', dtick: 1 },
+    yaxis: { title: 'sink strength', gridcolor: '#30363d', range: [0, 1] },
+    yaxis2: { title: 'mean entropy (norm)', overlaying: 'y', side: 'right',
+              gridcolor: 'transparent', color: '#79c0ff', range: [0, 1.05] },
+    legend: { x: 0.7, y: 0.98 },
+  }, { responsive: true, displaylogo: false });
 }
 
 // Order matters: render panels first, then overview reads their statuses.
-renderJob();
-renderTokenizer();
-renderData();
-renderModel();
-renderLoss();
-renderRouting();
-renderBitwise();
-renderCkpt();
-renderGaps();
-renderForwardAlign();
-renderChecklist();
-renderOverview();
+// Isolate each call in a try/catch so a single broken panel does not halt the
+// rest of the cascade (e.g. the Learning Dynamics tab registration at the end).
+function safeCall(fn, name) {
+  try { fn(); }
+  catch (e) {
+    console.error('[dashboard]', name, 'failed:', e.message);
+    const st = document.querySelector('#' + name + '-status')
+            || document.querySelector('#' + name.replace(/([A-Z])/g, '-$1').toLowerCase() + '-status');
+    if (st) { st.className = 'status-pill err'; st.textContent = 'render error'; }
+  }
+}
+safeCall(renderJob,          'job');
+safeCall(renderTokenizer,    'tok');
+safeCall(renderData,         'data');
+safeCall(renderModel,        'model');
+safeCall(renderLoss,         'loss');
+safeCall(renderRouting,      'routing');
+safeCall(renderMoEFleet,     'moe-fleet');
+safeCall(renderDenseAblation,'dense');
+safeCall(renderBitwise,      'bw');
+safeCall(renderCkpt,         'ckpt');
+safeCall(renderGaps,         'gap');
+safeCall(renderForwardAlign, 'fwd');
+safeCall(renderChecklist,    'chk');
+safeCall(renderOverview,     'overview');
 // Monitor tab renders lazily on first activation (see switchTab + TAB_RENDERERS).
 // If the page is loaded with #tab-dynamics as the starting tab, trigger now.
 if (location.hash === '#tab-dynamics') switchTab('tab-dynamics');

@@ -21,15 +21,13 @@
   "interpretation": [
     "At iter_0 with randomly initialized router (init_std=0.006 in 144-expert space), the top-8 / top-9 score margin is below 1 bf16 ULP for 98.89% of tokens.",
     "Any 1-ULP numerical difference in intermediate computation (F.linear cuBLAS tiling, sigmoid precision, score+bias ordering) can flip which expert ranks 8th vs 9th for nearly every token.",
-    "This makes the iter_0 routing decision effectively bf16-random on the decision boundary — nano and ref cannot produce identical routings even with bitwise-identical weights and inputs.",
-    "Once routings differ at iter 1, gradients differ, experts specialize in different directions, and the weight trajectories diverge permanently. This is the MECHANISM behind the bf16 weight-space divergence (cos 0.3 at iter 7485) and the +0.005 nat final loss gap.",
-    "Implication: for 144-expert MoE with K=8 topk, bf16 training makes perfect bitwise reproducibility physically impossible at the router level. The +0.005 gap is the statistical floor of two different-but-equivalent-quality minima reached from the same seed through a stochastic boundary decision process."
+    "This explains WHY nano and ref diverge in routing from iter_1 even with bitwise-identical weights and inputs. But it does NOT establish the magnitude of the resulting loss-gap floor."
   ],
-  "contrast_with_trained_router": "At later iters (iter 7000+), router weights are trained enough that most tokens have clear expert preferences (score margins would be much larger). But the initial iter_0 cascade has already set nano and ref on divergent trajectories.",
+  "overclaim_correction_20260423": "Earlier commits (745b173, 6bc101d, 50a3551) jumped from this mechanism to the conclusion that +0.005 nat is 'the bf16 physical floor' for nano-vs-ref alignment. That is not supported. This finding shows only that divergence is inevitable; the floor VALUE of the gap is not measured. Counter-evidence: v6-vs-v10 (both nano, different code, same seed) diff ≈ 0.0001, which is 50× smaller than the nano-vs-ref 0.005 gap. If bf16 topk-boundary noise were the whole story, two same-seed nano runs would also differ by ~0.005. The fact that they don't suggests the 0.005 gap contains a systematic component. Proper floor measurement requires nano-trained-with-seed-A vs nano-trained-with-seed-B (both different from ref's seed) — that experiment has not been run.",
   "mitigation_options": [
-    "(a) Train router in fp32 only (not bf16 autocast) — already done for scores; would need to extend to the F.linear internal path",
-    "(b) Use fp32 residual stream → router input has more precision → less tie-ambiguity",
-    "(c) Add small deterministic jitter to ref, not nano — force tie-breaking to match",
-    "(d) Accept: the gap is the floor, alignment at this level is unachievable in bf16"
+    "(a) Train router in fp32 only (not bf16 autocast) — already done for scores",
+    "(b) Use fp32 residual stream → router input more precise. ABLATION RESULT (fp32_residual_ablation.json): no effect — the 98.9% bf16-ambiguity rate is driven by WEIGHT-init score clustering, not input precision.",
+    "(c) Bit-exact F.linear kernel matching Megatron's cuBLAS path — complex but possible",
+    "(d) Further investigation pending seed-swap floor measurement"
   ]
 }

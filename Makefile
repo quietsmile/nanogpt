@@ -1,5 +1,48 @@
 PY = python3
 
+# ============================================================================
+# Dev iteration loop — run every code change
+# ============================================================================
+#
+#   make test      fast unit tests (<30s, CPU-only) — run on every save
+#   make bitwise   bitwise regression vs baselines (GPU, <10min) — before merge
+#   make smoke     short end-to-end smoke (GPU, <5min)
+#   make lint      ruff lint
+#   make ci        lint + test  (default pre-commit)
+#   make all       lint + test + bitwise + smoke (pre-merge)
+
+.PHONY: test bitwise smoke lint fmt ci all clean
+
+test:
+	$(PY) -m pytest tests/unit -x -q --timeout=15
+
+bitwise:
+	$(PY) -m pytest tests/regression -m bitwise -x --timeout=600
+
+smoke:
+	$(PY) -m pytest tests/integration -x --timeout=300
+
+lint:
+	ruff check . || echo "(ruff not installed, skipping)"
+
+fmt:
+	ruff check --fix . || echo "(ruff not installed, skipping)"
+
+ci: lint test
+	@echo "CI green. For pre-merge also run: make bitwise && make smoke"
+
+all: lint test bitwise smoke
+	@echo "ALL passed."
+
+clean:
+	find . -name __pycache__ -type d -exec rm -rf {} +
+	find . -name .pytest_cache -type d -exec rm -rf {} +
+	find . -name '*.pyc' -delete
+
+# ============================================================================
+# Legacy alignment test suite (kept for backward-compat)
+# ============================================================================
+
 # ---- Reference pull (DSW-only, ALIBABA_CLOUD_CREDENTIALS_URI must be set) ----
 JOB_ID ?= dlc1q9arre48b0kx
 WORKSPACE_ID ?= 262162

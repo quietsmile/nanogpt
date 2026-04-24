@@ -92,6 +92,7 @@ grad_clip = 1.0
 # Muon (NorMuon + Polar Express). When use_muon=True, attention/MLP 2D weights
 # and MoE 3D expert weights are routed to Muon; embeddings/router/norms stay on AdamW.
 use_muon = False
+muon_impl = 'normuon'     # 'normuon' (modded-nanogpt) | 'megatron' (PAI ref aligned port)
 muon_lr = None        # if None, defaults to learning_rate * 33 (typical Muon scale)
 muon_momentum = 0.95
 muon_beta2 = 0.95
@@ -379,7 +380,7 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 optimizer = model.configure_optimizers(
     weight_decay, learning_rate, (beta1, beta2), adam_eps, device_type,
     use_muon=use_muon, muon_lr=muon_lr, muon_momentum=muon_momentum,
-    muon_beta2=muon_beta2, muon_weight_decay=muon_weight_decay,
+    muon_beta2=muon_beta2, muon_weight_decay=muon_weight_decay, muon_impl=muon_impl,
 )
 # Tag each param_group with lr_mult so the LR schedule can scale heterogeneous groups
 # by a single base. AdamW groups default to 1.0; Muon group multiplies by its base/AdamW
@@ -532,6 +533,10 @@ raw_model = model.module if ddp else model
 running_mfu = -1.0
 monitor = create_monitor(raw_model, optimizer, out_dir=out_dir,
                          master=master_process, ddp=ddp)
+# Register a fixed probe batch (first real training batch) so attention-map
+# snapshots across iterations use identical inputs and are comparable. Only
+# matters when NANOGPT_MONITOR_PROBE_INTERVAL is set; otherwise this is cheap.
+monitor.register_probe(X[:1].detach().cpu())
 
 while True:
     # Set LR for this iteration
@@ -567,6 +572,11 @@ while True:
             pre_eval_Y = Y.clone()
 
         losses = estimate_loss()
+
+        # Attention probe — runs at eval_interval cadence (inherits from outer
+        # `if iter_num % eval_interval == 0`). No-op unless NANOGPT_MONITOR=1
+        # and NANOGPT_MONITOR_PROBE_INTERVAL is set; cheap guard otherwise.
+        monitor.maybe_probe(iter_num)
 
         # Restore data position and RNG on ALL ranks so eval batches don't skip training data
         _seq_data_pos.update(pre_eval_seq_pos)

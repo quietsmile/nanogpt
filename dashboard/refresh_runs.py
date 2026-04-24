@@ -114,10 +114,77 @@ RUNS = [
         'iter_offset': 1,
         'notes': '测试 maxvio 在 warmup 早期是否跟 ref 对齐；若对齐再在 optim 过程中 diverge，则定位到累积差异源。',
     },
+    {
+        'run_id': 'nano-196-v10repro-fixed-ab-s1337-20260424',
+        'label': 'v10repro fixed-AB s1337 · TE+sync MoE fix + fast-path flags · 7485步',
+        'has_biasfix': True,
+        'host': 'root@22.4.243.44',
+        'remote_jsonl': '/root/nanogpt/out-v10repro-fixed-ab-s1337/train_log.jsonl',
+        'remote_log': '/root/nanogpt/out-v10repro-fixed-ab-s1337/train.log',
+        'config': 'config/cybertron_moe_196_v10repro_fixed_ab_s1337.py',
+        'started_at': '2026-04-24 11:13:00 +0800',
+        'init_from': 'resume (ref iter_0 seed ckpt)',
+        'notes': 'TE+sync-grad-back MoE fix from agent；A(fused all-reduce)+B(fast-path flags)。Killed at iter ~130 后切 bucket-path。',
+    },
+    {
+        'run_id': 'nano-196-v10repro-fixed-ab-s4242-20260424',
+        'label': 'v10repro fixed-AB s4242 · TE+sync · 7485步',
+        'has_biasfix': True,
+        'host': 'root@22.1.6.211',
+        'remote_jsonl': '/root/nanogpt/out-v10repro-fixed-ab-s4242/train_log.jsonl',
+        'remote_log': '/root/nanogpt/out-v10repro-fixed-ab-s4242/train.log',
+        'config': 'config/cybertron_moe_196_v10repro_fixed_ab_s4242.py',
+        'started_at': '2026-04-24 11:14:00 +0800',
+        'init_from': 'resume (ref iter_0 seed ckpt)',
+        'notes': 'Seed 4242 on box2，TE+sync MoE fix。Killed at iter ~40 后切 bucket-path。',
+    },
+    {
+        'run_id': 'nano-196-v10repro-bucket-s1337-20260424',
+        'label': 'v10repro bucket s1337 · NANO_TE_MOE=0 bucket-padding · 7485步',
+        'has_biasfix': True,
+        'host': 'root@22.4.243.44',
+        'remote_jsonl': '/root/nanogpt/out-v10repro-bucket-s1337/train_log.jsonl',
+        'remote_log': '/root/nanogpt/out-v10repro-bucket-s1337/train.log',
+        'config': 'config/cybertron_moe_196_v10repro_bucket_s1337.py',
+        'started_at': '2026-04-24 11:36:00 +0800',
+        'init_from': 'resume (ref iter_0 seed ckpt)',
+        'notes': 'Bucket-padding path (grad 直接流 self.gate_weight，无 sync overhead)。dt ~1280ms/iter，比 TE+sync 快 2.6×，比 ref Megatron 只慢 1.3×。对 v10 轨迹 bf16 ULP 匹配。',
+    },
+    {
+        'run_id': 'nano-196-v10repro-bucket-s4242-20260424',
+        'label': 'v10repro bucket s4242 · NANO_TE_MOE=0 · 7485步',
+        'has_biasfix': True,
+        'host': 'root@22.1.6.211',
+        'remote_jsonl': '/root/nanogpt/out-v10repro-bucket-s4242/train_log.jsonl',
+        'remote_log': '/root/nanogpt/out-v10repro-bucket-s4242/train.log',
+        'config': 'config/cybertron_moe_196_v10repro_bucket_s4242.py',
+        'started_at': '2026-04-24 11:36:00 +0800',
+        'init_from': 'resume (ref iter_0 seed ckpt)',
+        'notes': 'Seed 4242 on box2，bucket-padding path。Seed variance check with s1337。',
+    },
+    {
+        'run_id': 'nano-196-pai-v10repro-bucket-full-20260424',
+        'label': 'v10repro bucket PAI full · 7485步（PAI dlc1e59rt6tz8bnz）',
+        'has_biasfix': True,
+        'host': None,  # PAI — data already on CPFS
+        'remote_jsonl': '/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_v10repro_bucket_full/train_log.jsonl',
+        'remote_log': '/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_v10repro_bucket_full/logs/rank-0-1-nano_moe_196_pai_v10repro_bucket_full.log',
+        'config': 'config/cybertron_moe_196_pai_v10repro_bucket_full.py',
+        'started_at': '2026-04-24 11:43:00 +0800',
+        'init_from': 'resume (ref iter_0 seed ckpt)',
+        'notes': 'PAI ws 137902 quota quotadbz1mvpy1v5，1 pod × 8 GPU，bucket-padding + fast-path。dt ~1440ms/iter，~3h 到 iter 7485。',
+    },
 ]
 
 
 def ssh_cat(host, path):
+    # host=None means local file (used for PAI runs whose data is on mounted CPFS)
+    if host is None:
+        try:
+            with open(path) as f:
+                return f.read()
+        except Exception:
+            return ''
     try:
         return subprocess.check_output(
             ['ssh', '-o', 'StrictHostKeyChecking=no', host, f'cat {path}'],
@@ -128,6 +195,14 @@ def ssh_cat(host, path):
 
 
 def ssh_grep(host, path, pattern):
+    if host is None:
+        try:
+            return subprocess.check_output(
+                ['sh', '-c', f"grep -E '{pattern}' {path} 2>/dev/null || true"],
+                text=True, timeout=30,
+            )
+        except subprocess.CalledProcessError:
+            return ''
     try:
         return subprocess.check_output(
             ['ssh', '-o', 'StrictHostKeyChecking=no', host,

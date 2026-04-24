@@ -22,6 +22,18 @@ class NullMonitor:
     def close(self):
         pass
 
+    def register_probe(self, *a, **kw):
+        pass
+
+    def maybe_probe(self, *a, **kw):
+        pass
+
+    def attach(self, *a, **kw):
+        pass
+
+    def detach(self, *a, **kw):
+        pass
+
 
 class Monitor:
     def __init__(self, model, optimizer, out_dir, master=True, ddp=False):
@@ -29,10 +41,19 @@ class Monitor:
         self.optimizer = optimizer
         self.master = master
         self.ddp = ddp
+        self.out_dir = out_dir
 
         # cadence knobs (all env-overridable)
         self.m_interval = int(os.environ.get('NANOGPT_MONITOR_M', '50'))
+        # probe_interval: run attention probe every N optim steps (0 = off).
+        # The probe runs a full eval-mode forward on a fixed batch of tokens,
+        # so it's expensive — default to 0 and let the user enable it explicitly
+        # (or set via train.py near the eval loop).
+        self.probe_interval = int(os.environ.get('NANOGPT_MONITOR_PROBE_INTERVAL', '0'))
         self.verbose = os.environ.get('NANOGPT_MONITOR_VERBOSE', '0') == '1'
+        # probe state (populated by register_probe)
+        self._probe_tokens = None
+        self._probe_snapshots = []
 
         # running state
         self._loss_ema = None        # (mean, var) exponential moving
@@ -188,6 +209,49 @@ class Monitor:
             out[li] = entry
         return out
 
+    # ------------------------------------------------------------------ #
+    # Attention probe integration
+    # ------------------------------------------------------------------ #
+    def register_probe(self, tokens):
+        """Register a fixed token tensor to use for the attention probe.
+
+        Call once after model init (train.py). The same tokens are passed to
+        every probe invocation so snapshots across iterations are directly
+        comparable. Accepts a torch tensor on any device — will be moved to
+        the model's device at probe time.
+        """
+        self._probe_tokens = tokens.detach().clone()
+
+    def maybe_probe(self, iter_num):
+        """Run attention probe if iter_num matches probe_interval and tokens
+        are registered. Safe to call from train.py eval loop unconditionally —
+        it no-ops when the interval is 0 or tokens not set."""
+        if self.probe_interval <= 0 or self._probe_tokens is None:
+            return
+        if int(iter_num) % self.probe_interval != 0:
+            return
+        if not self.master:
+            return
+        try:
+            from .attn_probe import probe_attention
+            device = next(self.model.parameters()).device
+            tokens = self._probe_tokens.to(device)
+            snap = probe_attention(self.model, tokens, downsample=128,
+                                   iter_tag=int(iter_num))
+            self._probe_snapshots.append(snap)
+            # Persist incrementally — overwrite a full snapshots-list file so
+            # a crash mid-run still leaves the prior snapshots recoverable.
+            path = os.path.join(self.out_dir, 'attention_maps.json')
+            with open(path, 'w') as f:
+                json.dump({'snapshots': self._probe_snapshots}, f)
+            if self.verbose:
+                print(f"[monitor] attn probe @ iter {iter_num}: "
+                      f"{snap['n_layer']}L × {snap['n_head']}H, "
+                      f"max sink={max(m['sink_strength'] for m in snap['metrics_per_layer']):.3f}")
+        except Exception as e:
+            if self.verbose:
+                print(f"[monitor] attn probe failed @ iter {iter_num}: {e}")
+
     def close(self):
         for h in self._hook_handles:
             try:
@@ -261,7 +325,8 @@ def _adam_v_stats(optimizer):
     if not vals:
         return {}
     cat = torch.cat(vals)
-    q = torch.quantile(cat, torch.tensor([0.5, 0.99]))
+    # quantile requires q tensor on same device as input — keep it portable.
+    q = torch.quantile(cat, torch.tensor([0.5, 0.99], device=cat.device))
     return {'p50': float(q[0].item()), 'p99': float(q[1].item())}
 
 

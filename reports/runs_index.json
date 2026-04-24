@@ -62,5 +62,45 @@
     "has_biasfix": true,
     "started_at": "2026-04-23 02:30:00 +0800",
     "file": "runs/nano-196-iter0diag-20260423.json"
+  },
+  {
+    "run_id": "nano-196-v10repro-fixed-ab-s1337-20260424",
+    "label": "v10repro fixed-AB s1337 \u00b7 TE+sync MoE fix + fast-path flags \u00b7 7485\u6b65",
+    "iters_completed": 299,
+    "has_biasfix": true,
+    "started_at": "2026-04-24 11:13:00 +0800",
+    "file": "runs/nano-196-v10repro-fixed-ab-s1337-20260424.json"
+  },
+  {
+    "run_id": "nano-196-v10repro-fixed-ab-s4242-20260424",
+    "label": "v10repro fixed-AB s4242 \u00b7 TE+sync \u00b7 7485\u6b65",
+    "iters_completed": 198,
+    "has_biasfix": true,
+    "started_at": "2026-04-24 11:14:00 +0800",
+    "file": "runs/nano-196-v10repro-fixed-ab-s4242-20260424.json"
+  },
+  {
+    "run_id": "nano-196-v10repro-bucket-s1337-20260424",
+    "label": "v10repro bucket s1337 \u00b7 NANO_TE_MOE=0 bucket-padding \u00b7 7485\u6b65",
+    "iters_completed": 3332,
+    "has_biasfix": true,
+    "started_at": "2026-04-24 11:36:00 +0800",
+    "file": "runs/nano-196-v10repro-bucket-s1337-20260424.json"
+  },
+  {
+    "run_id": "nano-196-v10repro-bucket-s4242-20260424",
+    "label": "v10repro bucket s4242 \u00b7 NANO_TE_MOE=0 \u00b7 7485\u6b65",
+    "iters_completed": 3315,
+    "has_biasfix": true,
+    "started_at": "2026-04-24 11:36:00 +0800",
+    "file": "runs/nano-196-v10repro-bucket-s4242-20260424.json"
+  },
+  {
+    "run_id": "nano-196-pai-v10repro-bucket-full-20260424",
+    "label": "v10repro bucket PAI full \u00b7 7485\u6b65\uff08PAI dlc1e59rt6tz8bnz\uff09",
+    "iters_completed": 2914,
+    "has_biasfix": true,
+    "started_at": "2026-04-24 11:43:00 +0800",
+    "file": "runs/nano-196-pai-v10repro-bucket-full-20260424.json"
   }
 ]
