@@ -20,11 +20,15 @@ JSONL_PATHS = {
     "s42":   "/prodcpfs/user/yuchen/scaling_exp/auto_test/v2_t14_moe196_full_s42/train_log.jsonl",
     "s7":    "/prodcpfs/user/yuchen/scaling_exp/auto_test/v2_moe196_full_scratch_s7/train_log.jsonl",
     "v1.0_canonical": "/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_v10repro_bucket_full/train_log.jsonl",
+    "nano_muon":  "/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_muon_megatron_full/train_log.jsonl",
+    "nano_muon_normuon": "/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_muon_normuon_full/train_log.jsonl",
 }
 REF_TB = ROOT / "reference" / "tb" / "key_scalars.json"
+REF_MUON = ROOT / "reference" / "tb" / "muon_ref_loss.json"
 
 REF_FLEET = {"mean": 2.8474, "std": 0.0051, "n_seeds": 4, "label": "Megatron ref Adam 4-seed"}
 V1_FLEET  = {"mean": 2.8463, "std": 0.0017, "n_seeds": 3, "label": "nano v1.0 bucket 3-seed"}
+MUON_REF_FLEET = {"mean": 2.7888, "std": 0.0032, "n_seeds": 5, "label": "Megatron Muon 5-seed"}
 
 
 def load_jsonl(p, fields=("iter", "loss", "dt_ms", "moe_dead_layermean",
@@ -74,6 +78,14 @@ def build_data():
     rows["megatron_ref"] = ref_rows
     print(f"loaded megatron_ref: {len(ref_rows)} iters")
 
+    # Megatron Muon refs (5 noise seeds + base)
+    if REF_MUON.exists():
+        mref = json.load(open(REF_MUON))
+        for name, lst in mref.items():
+            key = f"meg_muon_{name}"
+            rows[key] = [{"iter": it, "loss": loss} for it, loss in lst]
+            print(f"loaded {key}: {len(rows[key])} iters")
+
     # Compute summary stats
     summary = {}
     for name, rs in rows.items():
@@ -111,6 +123,20 @@ def build_data():
         }
     summary["_ref_fleet"] = REF_FLEET
     summary["_v1_fleet"] = V1_FLEET
+    summary["_muon_ref_fleet"] = MUON_REF_FLEET
+
+    # Muon fleet aggregate (across noise seeds we parsed)
+    muon_seeds = [n for n in ("meg_muon_noise1", "meg_muon_noise2", "meg_muon_noise3",
+                              "meg_muon_noise4", "meg_muon_noise5") if n in summary]
+    muon_losses = [summary[n]["tail_100_loss_mean"] for n in muon_seeds
+                   if summary[n]["tail_100_loss_mean"] is not None]
+    if muon_losses:
+        m = sum(muon_losses) / len(muon_losses)
+        var = sum((x - m) ** 2 for x in muon_losses) / max(1, len(muon_losses) - 1)
+        summary["_muon_fleet_measured"] = {
+            "n_seeds": len(muon_losses), "mean": m, "std": var ** 0.5,
+            "individual": dict(zip(muon_seeds, muon_losses)),
+        }
 
     return ds, summary
 
@@ -231,6 +257,49 @@ th { background: var(--panel); color: var(--muted); font-size: 11px;
       <h3>Dead experts (per layer mean) · entropy · maxvio (micro-batch)</h3>
       <div id="plot-moe" style="height:380px;"></div>
       <div class="note">All 3 seeds + v1.0 baseline track within ±0.5% on entropy and ±15% on dead experts — no routing pathology, divergence in loss is init lottery only.</div>
+    </div>
+  </div>
+
+  <h2>Muon optimizer — nano vs Megatron 5-seed ref</h2>
+  <div class="hero">
+    <div class="card accent">
+      <div class="label">nano Muon (megatron port) tail-100</div>
+      <div class="value" id="hero-muon-nano"></div>
+      <div class="sub" id="hero-muon-nano-sub"></div>
+    </div>
+    <div class="card accent2">
+      <div class="label">Megatron Muon 5-seed mean</div>
+      <div class="value" id="hero-muon-ref"></div>
+      <div class="sub" id="hero-muon-ref-sub"></div>
+    </div>
+    <div class="card">
+      <div class="label">Δ nano − ref</div>
+      <div class="value" id="hero-muon-delta"></div>
+      <div class="sub">positive = nano slightly worse</div>
+    </div>
+    <div class="card accent3">
+      <div class="label">Muon vs Adam (v2 fleet)</div>
+      <div class="value" id="hero-muon-vs-adam"></div>
+      <div class="sub">tail-100 nat lower</div>
+    </div>
+  </div>
+
+  <div class="row full">
+    <div class="panel">
+      <h3>Loss trajectory — nano Muon (port + NorMuon variant) vs Megatron 5-seed Muon ref</h3>
+      <div id="plot-muon-loss" style="height:430px;"></div>
+      <div class="note">All 5 Megatron Muon noise seeds (gray) overlap into a tight band; nano Muon megatron-port lands inside that band. NorMuon variant is slightly higher.</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h3>Tail-100 mean: nano Muon vs Megatron Muon 5-seed (with std error)</h3>
+      <div id="plot-muon-bar" style="height:380px;"></div>
+    </div>
+    <div class="panel">
+      <h3>Adam vs Muon — fleet means side-by-side</h3>
+      <div id="plot-opt-compare" style="height:380px;"></div>
     </div>
   </div>
 
@@ -396,11 +465,121 @@ Plotly.newPlot('plot-moe', moeTraces, {
   margin:{l:50,r:20,t:10,b:80}, showlegend:false,
 }, {displayModeBar:false, responsive:true});
 
+// ---------- Muon panels ----------
+const MUON_LBL = {nano_muon:'nano Muon (megatron port)', nano_muon_normuon:'nano NorMuon variant',
+                  meg_muon_base:'Megatron Muon (ef3.0 base)',
+                  meg_muon_noise1:'Megatron noise1', meg_muon_noise2:'Megatron noise2',
+                  meg_muon_noise3:'Megatron noise3', meg_muon_noise4:'Megatron noise4',
+                  meg_muon_noise5:'Megatron noise5'};
+const MUON_COLORS = {nano_muon:'#7ee787', nano_muon_normuon:'#ff7b72',
+                     meg_muon_base:'#bc8cff'};
+const MUON_GRAY = '#6e7681';
+
+// hero muon
+const muonNanoTail = SUMMARY.nano_muon?.tail_100_loss_mean;
+const muonNormTail = SUMMARY.nano_muon_normuon?.tail_100_loss_mean;
+const muonRef = SUMMARY._muon_ref_fleet;
+document.getElementById('hero-muon-nano').textContent = fmt(muonNanoTail, 4);
+document.getElementById('hero-muon-nano-sub').textContent =
+  `NorMuon variant: ${fmt(muonNormTail, 4)}`;
+document.getElementById('hero-muon-ref').textContent = fmt(muonRef.mean, 4);
+document.getElementById('hero-muon-ref-sub').textContent =
+  `± ${fmt(muonRef.std, 4)} (n=${muonRef.n_seeds})`;
+const muonDelta = (muonNanoTail || 0) - muonRef.mean;
+document.getElementById('hero-muon-delta').textContent =
+  (muonDelta>=0?'+':'') + fmt(muonDelta, 4) + ' nat';
+const muonVsAdam = (muonNanoTail || 0) - (SUMMARY._v2_fleet?.mean || 0);
+document.getElementById('hero-muon-vs-adam').textContent =
+  fmt(muonVsAdam, 4) + ' nat';
+
+// muon loss trajectory
+const muonTraces = [];
+for (const n of ['meg_muon_noise1','meg_muon_noise2','meg_muon_noise3','meg_muon_noise4','meg_muon_noise5']) {
+  if (!DATA[n]) continue;
+  muonTraces.push({
+    x: DATA[n].map(r=>r.iter), y: ema(DATA[n].map(r=>r.loss), 0.05),
+    name: MUON_LBL[n], type:'scatter', mode:'lines',
+    line:{color: MUON_GRAY, width: 1}, opacity: 0.55,
+    legendgroup: 'meg_muon', showlegend: n === 'meg_muon_noise1',
+  });
+}
+muonTraces[muonTraces.length] = muonTraces[0] && {...muonTraces[0], name:'Megatron Muon 5-seed', showlegend: true};
+for (const n of ['nano_muon','nano_muon_normuon']) {
+  if (!DATA[n]) continue;
+  muonTraces.push({
+    x: DATA[n].map(r=>r.iter), y: ema(DATA[n].map(r=>r.loss), 0.05),
+    name: MUON_LBL[n], type:'scatter', mode:'lines',
+    line:{color: MUON_COLORS[n], width: 2},
+  });
+}
+Plotly.newPlot('plot-muon-loss', muonTraces, {
+  paper_bgcolor:'#161b22', plot_bgcolor:'#0e1116', font:{color:'#e6edf3', size:11},
+  xaxis:{title:'iter', gridcolor:'#30363d'},
+  yaxis:{title:'loss (EMA)', type:'log', gridcolor:'#30363d'},
+  legend:{x:0.7, y:0.95, bgcolor:'rgba(0,0,0,0.4)'},
+  margin:{l:60,r:20,t:10,b:50},
+}, {displayModeBar:false, responsive:true});
+
+// muon bar — per-seed + fleet
+const muonSeedNames = ['nano_muon','nano_muon_normuon','meg_muon_noise1','meg_muon_noise2','meg_muon_noise3','meg_muon_noise4','meg_muon_noise5'];
+const muonSeedVals = muonSeedNames.map(s => SUMMARY[s]?.tail_100_loss_mean);
+const muonSeedColors = muonSeedNames.map(s => s.startsWith('nano') ? (MUON_COLORS[s] || '#7ee787') : MUON_GRAY);
+const muonSeedLbls = muonSeedNames.map(s => (MUON_LBL[s] || s).replace('Megatron ',''));
+const muonBar = {x: muonSeedLbls, y: muonSeedVals, type:'bar',
+                 marker:{color: muonSeedColors},
+                 text: muonSeedVals.map(v=>fmt(v,4)), textposition:'outside'};
+const measuredFleet = SUMMARY._muon_fleet_measured;
+const muonFleetBar = {
+  x: ['nano Muon','Megatron Muon 5-seed'],
+  y: [muonNanoTail, measuredFleet?.mean ?? muonRef.mean],
+  type:'bar', marker:{color:['#7ee787','#bc8cff']},
+  error_y: {type:'data', array:[0, measuredFleet?.std ?? muonRef.std], color:'#e6edf3', thickness:1.5, width:6},
+  text: [fmt(muonNanoTail,4), fmt(measuredFleet?.mean ?? muonRef.mean,4)+' ± '+fmt(measuredFleet?.std ?? muonRef.std,4)],
+  textposition:'outside', xaxis:'x2', yaxis:'y2',
+};
+Plotly.newPlot('plot-muon-bar', [muonBar, muonFleetBar], {
+  paper_bgcolor:'#161b22', plot_bgcolor:'#0e1116', font:{color:'#e6edf3', size:10},
+  grid:{rows:1, columns:2, pattern:'independent'},
+  xaxis:{domain:[0,0.55], gridcolor:'#30363d', tickangle:-30},
+  yaxis:{domain:[0,1], range:[2.77, 2.81], title:'tail-100 loss', gridcolor:'#30363d'},
+  xaxis2:{domain:[0.66,1], gridcolor:'#30363d'},
+  yaxis2:{domain:[0,1], range:[2.77, 2.81], gridcolor:'#30363d'},
+  margin:{l:55,r:20,t:10,b:90}, showlegend:false,
+}, {displayModeBar:false, responsive:true});
+
+// optimizer comparison: Adam vs Muon
+const optBar = {
+  x: ['v2 Adam (3-seed)','nano Muon','Megatron Adam (4-seed)','Megatron Muon (5-seed)'],
+  y: [SUMMARY._v2_fleet?.mean, muonNanoTail, SUMMARY._ref_fleet.mean, measuredFleet?.mean ?? muonRef.mean],
+  type:'bar',
+  marker:{color:['#7ee787','#79c0ff','#bc8cff','#ffa657']},
+  error_y: {type:'data',
+            array:[SUMMARY._v2_fleet?.std, 0, SUMMARY._ref_fleet.std, measuredFleet?.std ?? muonRef.std],
+            color:'#e6edf3', thickness:1.5, width:6},
+  text: [
+    fmt(SUMMARY._v2_fleet?.mean,4)+' ± '+fmt(SUMMARY._v2_fleet?.std,4),
+    fmt(muonNanoTail,4),
+    fmt(SUMMARY._ref_fleet.mean,4)+' ± '+fmt(SUMMARY._ref_fleet.std,4),
+    fmt(measuredFleet?.mean ?? muonRef.mean,4)+' ± '+fmt(measuredFleet?.std ?? muonRef.std,4),
+  ], textposition:'outside',
+};
+Plotly.newPlot('plot-opt-compare', [optBar], {
+  paper_bgcolor:'#161b22', plot_bgcolor:'#0e1116', font:{color:'#e6edf3', size:11},
+  xaxis:{tickangle:-15, gridcolor:'#30363d'},
+  yaxis:{title:'tail-100 loss', range:[2.77, 2.87], gridcolor:'#30363d'},
+  margin:{l:60,r:20,t:10,b:80}, showlegend:false,
+}, {displayModeBar:false, responsive:true});
+
 // ---------- summary table ----------
+const _muonM = SUMMARY._muon_fleet_measured?.mean ?? SUMMARY._muon_ref_fleet.mean;
+const _muonS = SUMMARY._muon_fleet_measured?.std ?? SUMMARY._muon_ref_fleet.std;
+const _muonN = SUMMARY._muon_fleet_measured?.n_seeds ?? SUMMARY._muon_ref_fleet.n_seeds;
 const sumRows = [
-  ['v2.0.0 3-seed', SUMMARY._v2_fleet?.mean, SUMMARY._v2_fleet?.std, SUMMARY._v2_fleet?.n_seeds, dRef, v2dt],
-  ['nano v1.0 3-seed bucket', SUMMARY._v1_fleet.mean, SUMMARY._v1_fleet.std, SUMMARY._v1_fleet.n_seeds, SUMMARY._v1_fleet.mean - SUMMARY._ref_fleet.mean, v1dt],
-  ['Megatron ref 4-seed', SUMMARY._ref_fleet.mean, SUMMARY._ref_fleet.std, SUMMARY._ref_fleet.n_seeds, 0, '—'],
+  ['v2.0.0 Adam 3-seed', SUMMARY._v2_fleet?.mean, SUMMARY._v2_fleet?.std, SUMMARY._v2_fleet?.n_seeds, dRef, v2dt],
+  ['nano v1.0 bucket 3-seed', SUMMARY._v1_fleet.mean, SUMMARY._v1_fleet.std, SUMMARY._v1_fleet.n_seeds, SUMMARY._v1_fleet.mean - SUMMARY._ref_fleet.mean, v1dt],
+  ['Megatron Adam 4-seed (ref)', SUMMARY._ref_fleet.mean, SUMMARY._ref_fleet.std, SUMMARY._ref_fleet.n_seeds, 0, '—'],
+  ['nano Muon (1 run)', muonNanoTail, '—', 1, muonNanoTail - _muonM, SUMMARY.nano_muon?.dt_ms_median],
+  ['Megatron Muon 5-seed (ref)', _muonM, _muonS, _muonN, _muonM - _muonM, '—'],
 ];
 const stb = document.getElementById('summary-tbody');
 for (const [lbl, m, std, n, dr, dt] of sumRows) {
