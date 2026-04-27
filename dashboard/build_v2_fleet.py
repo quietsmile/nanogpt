@@ -22,6 +22,12 @@ JSONL_PATHS = {
     "v1.0_canonical": "/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_v10repro_bucket_full/train_log.jsonl",
     "nano_muon":  "/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_muon_megatron_full/train_log.jsonl",
     "nano_muon_normuon": "/prodcpfs/user/yuchen/scaling_exp/auto_test/nano_moe_196_pai_muon_normuon_full/train_log.jsonl",
+    # v2 Muon LR1X 3-seed fleet (post-fix 2026-04-27)
+    "v2_muon_lr1x_s1337": "/prodcpfs/user/yuchen/scaling_exp/auto_test/v2_muon_LR1X_full_s1337/train_log.jsonl",
+    "v2_muon_lr1x_s42":   "/prodcpfs/user/yuchen/scaling_exp/auto_test/v2_muon_LR1X_full_s42/train_log.jsonl",
+    "v2_muon_lr1x_s7":    "/prodcpfs/user/yuchen/scaling_exp/auto_test/v2_muon_LR1X_full_s7/train_log.jsonl",
+    # the buggy v2 33x (kept for "before/after" panel)
+    "v2_muon_buggy_33x": "/prodcpfs/user/yuchen/scaling_exp/auto_test/v2_muon_full_s1337/train_log.jsonl",
 }
 REF_TB = ROOT / "reference" / "tb" / "key_scalars.json"
 REF_MUON = ROOT / "reference" / "tb" / "muon_ref_loss.json"
@@ -124,6 +130,18 @@ def build_data():
     summary["_ref_fleet"] = REF_FLEET
     summary["_v1_fleet"] = V1_FLEET
     summary["_muon_ref_fleet"] = MUON_REF_FLEET
+
+    # v2 Muon LR1X 3-seed fleet (post-fix)
+    v2_muon_seeds = [n for n in ("v2_muon_lr1x_s1337", "v2_muon_lr1x_s42", "v2_muon_lr1x_s7") if n in summary]
+    v2_muon_losses = [summary[n]["tail_100_loss_mean"] for n in v2_muon_seeds
+                      if summary[n]["tail_100_loss_mean"] is not None]
+    if v2_muon_losses:
+        m = sum(v2_muon_losses) / len(v2_muon_losses)
+        var = sum((x - m) ** 2 for x in v2_muon_losses) / max(1, len(v2_muon_losses) - 1)
+        summary["_v2_muon_fleet"] = {
+            "n_seeds": len(v2_muon_losses), "mean": m, "std": var ** 0.5,
+            "individual": dict(zip(v2_muon_seeds, v2_muon_losses)),
+        }
 
     # Muon fleet aggregate (across noise seeds we parsed)
     muon_seeds = [n for n in ("meg_muon_noise1", "meg_muon_noise2", "meg_muon_noise3",
