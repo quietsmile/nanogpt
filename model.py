@@ -1154,7 +1154,49 @@ class GPT(nn.Module):
             from nanogpt.optim import MultiOptimizer
             from nanogpt.optim.recipes import muon_megatron as _recipe_megatron
 
+            def _build_fused_lists(names, params):
+                """Discover Q/K/V and gate/up triplets/pairs by name pattern.
+
+                Megatron uses fused linear_qkv and fused linear_fc1 (gate+up).
+                Nano splits these. To match Megatron's NS5 update geometry we
+                tell Muon to virtually concatenate them before orthogonalize.
+                """
+                idx_by_name = {n: i for i, n in enumerate(names)}
+                groups = []
+                # find every layer prefix that has q_proj/k_proj/v_proj
+                seen_prefixes = set()
+                for n in names:
+                    for tag in ('.q_proj.weight', '.k_proj.weight', '.v_proj.weight'):
+                        if n.endswith(tag):
+                            prefix = n[: -len(tag)]
+                            if prefix in seen_prefixes:
+                                continue
+                            seen_prefixes.add(prefix)
+                            triplet = [
+                                f'{prefix}.q_proj.weight',
+                                f'{prefix}.k_proj.weight',
+                                f'{prefix}.v_proj.weight',
+                            ]
+                            if all(t in idx_by_name for t in triplet):
+                                groups.append([params[idx_by_name[t]] for t in triplet])
+                # gate/up pairs (covers SwiGLU shared expert and SwiGLU MLP)
+                for n in names:
+                    if n.endswith('.gate_proj.weight'):
+                        prefix = n[: -len('.gate_proj.weight')]
+                        partner = f'{prefix}.up_proj.weight'
+                        if partner in idx_by_name:
+                            groups.append([params[idx_by_name[n]], params[idx_by_name[partner]]])
+                # gate_weight/up_weight pairs (covers ExpertMLP packed [E, hidden, in])
+                for n in names:
+                    if n.endswith('.gate_weight'):
+                        prefix = n[: -len('.gate_weight')]
+                        partner = f'{prefix}.up_weight'
+                        if partner in idx_by_name:
+                            groups.append([params[idx_by_name[n]], params[idx_by_name[partner]]])
+                return groups
+
             def Muon(params, lr, momentum_beta, weight_decay, **kw):
+                fused_lists = _build_fused_lists(muon_names, params) if kw.get('fuse_attn_qkv', True) else None
                 return _NewMuon(
                     params,
                     pipeline=_recipe_megatron(
@@ -1167,6 +1209,7 @@ class GPT(nn.Module):
                     ),
                     lr=lr,
                     weight_decay=weight_decay,
+                    fused_param_lists=fused_lists,
                 )
         else:
             raise ValueError(f"unknown muon_impl {muon_impl!r} "

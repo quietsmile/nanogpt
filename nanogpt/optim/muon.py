@@ -33,9 +33,24 @@ import torch
 from torch.optim.optimizer import Optimizer
 
 from .pipeline import OptimStep, StepContext
+from .steps.orthogonalize import NewtonSchulz, PolarExpress
+
+
+_ORTHO_TYPES = (NewtonSchulz, PolarExpress)
 
 
 class Muon(Optimizer):
+    """Pipeline-based Muon.
+
+    `fused_param_lists` (optional): list of lists of params that share an input
+    dim and should be treated as a single virtual matrix during orthogonalize
+    (e.g. nano's split q_proj/k_proj/v_proj corresponds to Megatron's fused
+    linear_qkv). For each list, momentum/weight-decay run per-param as usual,
+    then grads are vstack'd, one orthogonalize call runs on the fused tensor,
+    the result is split back, and the post-ortho steps (spectral scale) run
+    per-param. All params in a list must share `shape[1]`.
+    """
+
     def __init__(
         self,
         params,
@@ -43,6 +58,7 @@ class Muon(Optimizer):
         lr: float = 3e-4,
         weight_decay: float = 0.1,
         hook: Callable[[str, StepContext], None] | None = None,
+        fused_param_lists: list[list[torch.Tensor]] | None = None,
     ):
         if not pipeline:
             raise ValueError("pipeline must contain at least one OptimStep")
@@ -54,6 +70,27 @@ class Muon(Optimizer):
         self.pipeline = pipeline
         self.hook = hook
 
+        # Locate the orthogonalize step (used by fused path); None if pipeline has none.
+        self._ortho_idx = next(
+            (i for i, s in enumerate(pipeline) if isinstance(s, _ORTHO_TYPES)),
+            None,
+        )
+
+        # Build {id(p): (group_idx, group_params)} for fast lookup during step.
+        self._fused_map: dict[int, tuple[int, list[torch.Tensor]]] = {}
+        self._fused_lists: list[list[torch.Tensor]] = list(fused_param_lists or [])
+        for gi, plist in enumerate(self._fused_lists):
+            if len(plist) < 2:
+                continue
+            in_dim = plist[0].shape[1]
+            for p in plist:
+                if p.shape[1] != in_dim:
+                    raise ValueError(
+                        f"fused params must share shape[1]; group {gi} got "
+                        f"{[tuple(x.shape) for x in plist]}"
+                    )
+                self._fused_map[id(p)] = (gi, plist)
+
     @torch.no_grad()
     def step(self, closure=None):
         loss = None
@@ -62,30 +99,111 @@ class Muon(Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
+            standalone = []
+            seen_fused: dict[int, list[torch.Tensor]] = {}
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                if p.dim() not in (2, 3):
-                    raise ValueError(
-                        f"Muon requires 2D or 3D params; got {tuple(p.shape)}. "
-                        "Route 1D / scalar params to AdamW."
-                    )
-                ctx = StepContext(
-                    param=p,
-                    grad=p.grad,
-                    state=self.state[p],
-                    group=group,
-                )
-                for step in self.pipeline:
-                    step(ctx)
-                    if self.hook is not None:
-                        self.hook(type(step).__name__, ctx)
-                # Final update: requires ctx.update (set by Scale) or fall back to ctx.grad.
-                if ctx.update is None:
-                    # No Scale step present — treat ctx.grad as the update, lr_scale=1.
-                    update = ctx.grad.to(p.dtype)
+                key = id(p)
+                if key in self._fused_map:
+                    gi, plist = self._fused_map[key]
+                    if gi not in seen_fused:
+                        seen_fused[gi] = plist
                 else:
-                    update = ctx.update
-                p.data.add_(update, alpha=-group["lr"] * ctx.lr_scale)
+                    standalone.append(p)
+
+            for p in standalone:
+                self._step_one(p, group)
+            for plist in seen_fused.values():
+                self._step_fused(plist, group)
 
         return loss
+
+    # ---------- single-param path (unchanged behavior) ----------
+    def _step_one(self, p: torch.Tensor, group: dict) -> None:
+        if p.dim() not in (2, 3):
+            raise ValueError(
+                f"Muon requires 2D or 3D params; got {tuple(p.shape)}. "
+                "Route 1D / scalar params to AdamW."
+            )
+        ctx = StepContext(
+            param=p, grad=p.grad, state=self.state[p], group=group,
+        )
+        for step in self.pipeline:
+            step(ctx)
+            if self.hook is not None:
+                self.hook(type(step).__name__, ctx)
+        update = ctx.update if ctx.update is not None else ctx.grad.to(p.dtype)
+        p.data.add_(update, alpha=-group["lr"] * ctx.lr_scale)
+
+    # ---------- fused-group path ----------
+    def _step_fused(self, plist: list[torch.Tensor], group: dict) -> None:
+        if self._ortho_idx is None:
+            # No orthogonalize in pipeline — fused fusion has no effect; fall back per-param.
+            for p in plist:
+                if p.grad is not None:
+                    self._step_one(p, group)
+            return
+
+        # Pre-ortho stages run per-param (momentum buffer is per-param).
+        ctxs = []
+        for p in plist:
+            if p.grad is None:
+                continue
+            if p.dim() not in (2, 3):
+                raise ValueError(
+                    f"fused Muon supports 2D or 3D params; got {tuple(p.shape)}"
+                )
+            ctx = StepContext(
+                param=p, grad=p.grad, state=self.state[p], group=group,
+            )
+            for step in self.pipeline[: self._ortho_idx]:
+                step(ctx)
+                if self.hook is not None:
+                    self.hook(type(step).__name__, ctx)
+            ctxs.append(ctx)
+        if not ctxs:
+            return
+
+        # Concat grads along the "out" dim (dim 0 for 2D, dim 1 for 3D batch-style).
+        grads = [c.grad for c in ctxs]
+        ndim = grads[0].dim()
+        if any(g.dim() != ndim for g in grads):
+            raise ValueError(f"fused grads must share ndim; got {[g.dim() for g in grads]}")
+        cat_dim = 0 if ndim == 2 else 1
+        out_dims = [g.shape[cat_dim] for g in grads]
+        ref_shape = list(grads[0].shape)
+        for g in grads:
+            for d in range(ndim):
+                if d == cat_dim:
+                    continue
+                if g.shape[d] != ref_shape[d]:
+                    raise ValueError(
+                        f"fused grads must share non-cat dims; got {[tuple(x.shape) for x in grads]}"
+                    )
+        fused_grad = torch.cat(grads, dim=cat_dim)
+        ortho_step = self.pipeline[self._ortho_idx]
+        fused_ctx = StepContext(
+            param=ctxs[0].param, grad=fused_grad,
+            state={}, group=group,
+        )
+        ortho_step(fused_ctx)
+        if self.hook is not None:
+            self.hook(type(ortho_step).__name__ + ":fused", fused_ctx)
+
+        offsets = [0]
+        for d in out_dims:
+            offsets.append(offsets[-1] + d)
+        for i, c in enumerate(ctxs):
+            sl = [slice(None)] * ndim
+            sl[cat_dim] = slice(offsets[i], offsets[i + 1])
+            c.grad = fused_ctx.grad[tuple(sl)]
+
+        # Post-ortho stages (spectral scale, etc.) run per-param.
+        for c in ctxs:
+            for step in self.pipeline[self._ortho_idx + 1:]:
+                step(c)
+                if self.hook is not None:
+                    self.hook(type(step).__name__, c)
+            update = c.update if c.update is not None else c.grad.to(c.param.dtype)
+            c.param.data.add_(update, alpha=-group["lr"] * c.lr_scale)
