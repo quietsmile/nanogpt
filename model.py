@@ -1248,7 +1248,9 @@ class GPT(nn.Module):
         if any('.router.linear' in n for n in muon_names):
             raise RuntimeError("MoE router weight wrongly routed to Muon")
 
-        muon_lr_eff = muon_lr if muon_lr is not None else (learning_rate * 33.0)
+        muon_lr_eff = muon_lr if muon_lr is not None else (learning_rate * 1.0)
+        # Default 1.0× matches Megatron muon_lr_multiplier=1.0. Earlier 33×
+        # default (modded-nanogpt convention) caused +0.2 nat regression on scratch.
         muon_wd_eff = muon_weight_decay if muon_weight_decay is not None else weight_decay
 
         muon_total = sum(p.numel() for p in muon_params)

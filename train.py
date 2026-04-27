@@ -100,7 +100,7 @@ grad_clip = 1.0
 # and MoE 3D expert weights are routed to Muon; embeddings/router/norms stay on AdamW.
 use_muon = False
 muon_impl = 'normuon'     # 'normuon' (modded-nanogpt) | 'megatron' (PAI ref aligned port)
-muon_lr = None        # if None, defaults to learning_rate * 33 (typical Muon scale)
+muon_lr = None        # if None, defaults to learning_rate * 1.0 (matches Megatron muon_lr_multiplier=1.0). Old default was 33x (modded-nanogpt convention) but produced +0.2 nat regression vs ref on scratch — see config/v2_moe196_muon_LR1X_s1337.py.
 muon_momentum = 0.95
 muon_beta2 = 0.95
 muon_weight_decay = None  # if None, uses weight_decay
