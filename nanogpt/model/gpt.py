@@ -408,14 +408,31 @@ class GPT(nn.Module):
                             groups.append([params[idx[n]], params[idx[partner]]])
                 return groups
 
+            def _build_per_head_split(names, params, head_dim):
+                """Match Megatron's `enable_qkv_per_head=True`: split each
+                Q/K/V projection along dim 0 into n_heads × head_dim chunks
+                and run NS5 independently on each [head_dim, in_dim] chunk.
+
+                Returns {id(p) → head_dim} for q_proj/k_proj/v_proj weights.
+                """
+                m = {}
+                for n, p in zip(names, params):
+                    if any(n.endswith(t) for t in (
+                        '.q_proj.weight', '.k_proj.weight', '.v_proj.weight')):
+                        if p.dim() == 2 and p.shape[0] % head_dim == 0:
+                            m[id(p)] = head_dim
+                return m
+
             def Muon(params, lr, momentum_beta, weight_decay, **kw):
-                fused_lists = (
-                    _build_fused_lists(muon_names, params)
-                    if kw.get('fuse_attn_qkv', True) else None
+                # Per-head Q/K/V NS5 (Megatron `muon_qkv_per_head=True`).
+                head_dim = self.config.kv_channels or (self.config.n_embd // self.config.n_head)
+                per_head = (
+                    _build_per_head_split(muon_names, params, head_dim)
+                    if kw.get('qkv_per_head', True) else None
                 )
-                if fused_lists:
-                    print(f"  Muon fused groups: {len(fused_lists)} "
-                          f"(QKV/gate+up — matches Megatron linear_qkv/linear_fc1)")
+                if per_head:
+                    print(f"  Muon per-head split: {len(per_head)} Q/K/V tensors "
+                          f"(head_dim={head_dim} — matches Megatron muon_qkv_per_head)")
                 return _NewMuon(
                     params,
                     pipeline=_recipe_megatron(
@@ -428,7 +445,7 @@ class GPT(nn.Module):
                     ),
                     lr=lr,
                     weight_decay=weight_decay,
-                    fused_param_lists=fused_lists,
+                    per_head_split=per_head,
                 )
         else:
             raise ValueError(f"unknown muon_impl {muon_impl!r} "

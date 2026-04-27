@@ -59,6 +59,7 @@ class Muon(Optimizer):
         weight_decay: float = 0.1,
         hook: Callable[[str, StepContext], None] | None = None,
         fused_param_lists: list[list[torch.Tensor]] | None = None,
+        per_head_split: dict[int, int] | None = None,
     ):
         if not pipeline:
             raise ValueError("pipeline must contain at least one OptimStep")
@@ -75,6 +76,11 @@ class Muon(Optimizer):
             (i for i, s in enumerate(pipeline) if isinstance(s, _ORTHO_TYPES)),
             None,
         )
+
+        # Per-head split: {id(p) → head_dim}. For each such param, ortho is run
+        # independently on each [head_dim, in_dim] chunk along dim 0 (matches
+        # Megatron's `enable_qkv_per_head=True` for Q/K/V Muon path).
+        self._per_head_split: dict[int, int] = dict(per_head_split or {})
 
         # Build {id(p): (group_idx, group_params)} for fast lookup during step.
         self._fused_map: dict[int, tuple[int, list[torch.Tensor]]] = {}
@@ -119,22 +125,75 @@ class Muon(Optimizer):
 
         return loss
 
-    # ---------- single-param path (unchanged behavior) ----------
+    # ---------- single-param path ----------
     def _step_one(self, p: torch.Tensor, group: dict) -> None:
         if p.dim() not in (2, 3):
             raise ValueError(
                 f"Muon requires 2D or 3D params; got {tuple(p.shape)}. "
                 "Route 1D / scalar params to AdamW."
             )
+        head_dim = self._per_head_split.get(id(p))
+        if head_dim is None or self._ortho_idx is None:
+            # Standard path: full pipeline on the whole param.
+            ctx = StepContext(
+                param=p, grad=p.grad, state=self.state[p], group=group,
+            )
+            for step in self.pipeline:
+                step(ctx)
+                if self.hook is not None:
+                    self.hook(type(step).__name__, ctx)
+            update = ctx.update if ctx.update is not None else ctx.grad.to(p.dtype)
+            p.data.add_(update, alpha=-group["lr"] * ctx.lr_scale)
+            return
+
+        # Per-head path: pre-ortho per-param (single momentum buffer for the
+        # full grad), then split grad into [head_dim, in_dim] chunks along
+        # dim 0, run ortho independently on each, concat back, continue with
+        # post-ortho per-chunk (so spectral scale is computed against
+        # head_dim × in_dim, matching Megatron exactly).
         ctx = StepContext(
             param=p, grad=p.grad, state=self.state[p], group=group,
         )
-        for step in self.pipeline:
+        for step in self.pipeline[: self._ortho_idx]:
             step(ctx)
             if self.hook is not None:
                 self.hook(type(step).__name__, ctx)
-        update = ctx.update if ctx.update is not None else ctx.grad.to(p.dtype)
-        p.data.add_(update, alpha=-group["lr"] * ctx.lr_scale)
+        if ctx.grad.dim() != 2:
+            raise ValueError(
+                f"per_head_split requires 2D param; got {tuple(p.shape)}"
+            )
+        out_dim = ctx.grad.shape[0]
+        if out_dim % head_dim != 0:
+            raise ValueError(
+                f"out_dim {out_dim} not divisible by head_dim {head_dim}"
+            )
+        n_heads = out_dim // head_dim
+        ortho_step = self.pipeline[self._ortho_idx]
+
+        # Apply post-ortho stages to a synthetic ctx per head, then sum
+        # (since it's an additive update accumulation per head with
+        # independent ortho results).
+        head_updates = []
+        head_lr_scale = 1.0
+        for h in range(n_heads):
+            sl = slice(h * head_dim, (h + 1) * head_dim)
+            head_grad = ctx.grad[sl].clone()
+            head_ctx = StepContext(
+                param=p[sl], grad=head_grad, state={}, group=group,
+            )
+            ortho_step(head_ctx)
+            if self.hook is not None:
+                self.hook(type(ortho_step).__name__ + ":head", head_ctx)
+            for step in self.pipeline[self._ortho_idx + 1:]:
+                step(head_ctx)
+                if self.hook is not None:
+                    self.hook(type(step).__name__, head_ctx)
+            head_updates.append(
+                head_ctx.update if head_ctx.update is not None else head_ctx.grad.to(p.dtype)
+            )
+            head_lr_scale = head_ctx.lr_scale
+        update = torch.cat(head_updates, dim=0)
+        p.data.add_(update, alpha=-group["lr"] * head_lr_scale)
 
     # ---------- fused-group path ----------
     def _step_fused(self, plist: list[torch.Tensor], group: dict) -> None:

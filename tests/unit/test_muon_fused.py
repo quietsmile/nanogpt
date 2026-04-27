@@ -166,6 +166,61 @@ def test_fused_step_3d_expert_weights():
     assert err < 1e-6, f"3D fused path drift: max|Δ|={err:.2e}"
 
 
+def test_per_head_split_matches_chunkwise_ns5():
+    """per_head_split=True splits Q [n_heads*head_dim, in_dim] along dim 0
+    into n_heads chunks of [head_dim, in_dim] and runs NS5 + scale on each.
+    Should equal manually concatenating the per-chunk results.
+    """
+    torch.manual_seed(31)
+    n_heads, head_dim, in_dim = 4, 16, 64
+    out_dim = n_heads * head_dim
+    q_init = torch.randn(out_dim, in_dim, dtype=torch.float32)
+    q_grad = torch.randn(out_dim, in_dim)
+
+    # Path A: Muon with per_head_split
+    q1 = q_init.clone().requires_grad_(True); q1.grad = q_grad.clone()
+    opt_a = Muon([q1], pipeline=_make_pipeline(), lr=1e-3,
+                 per_head_split={id(q1): head_dim})
+    opt_a.step()
+
+    # Path B: manually run Muon per head
+    head_results = []
+    for h in range(n_heads):
+        sl = slice(h * head_dim, (h + 1) * head_dim)
+        chunk = q_init[sl].clone().requires_grad_(True)
+        chunk.grad = q_grad[sl].clone()
+        opt_h = Muon([chunk], pipeline=_make_pipeline(), lr=1e-3)
+        opt_h.step()
+        head_results.append(chunk.detach())
+    expected = torch.cat(head_results, dim=0)
+
+    err = (q1.detach() - expected).abs().max().item()
+    assert err < 1e-7, f"per_head trajectory drift: max|Δ|={err:.2e}"
+
+
+def test_per_head_differs_from_full_tensor_ns5():
+    """Sanity that per-head differs from running NS5 on the whole [out, in]."""
+    torch.manual_seed(37)
+    n_heads, head_dim, in_dim = 4, 16, 64
+    out_dim = n_heads * head_dim
+    q_init = torch.randn(out_dim, in_dim, dtype=torch.float32)
+    q_grad = torch.randn(out_dim, in_dim)
+
+    # per-head
+    q1 = q_init.clone().requires_grad_(True); q1.grad = q_grad.clone()
+    opt_a = Muon([q1], pipeline=_make_pipeline(), lr=1e-3,
+                 per_head_split={id(q1): head_dim})
+    opt_a.step()
+
+    # full-tensor (default)
+    q2 = q_init.clone().requires_grad_(True); q2.grad = q_grad.clone()
+    opt_b = Muon([q2], pipeline=_make_pipeline(), lr=1e-3)
+    opt_b.step()
+
+    diff = (q1.detach() - q2.detach()).abs().max().item()
+    assert diff > 1e-4, f"per-head vs full-tensor produced ~identical updates (max|Δ|={diff:.2e})"
+
+
 def test_no_ortho_in_pipeline_falls_back_per_param():
     """If pipeline has no ortho step, fused list silently degrades to per-param."""
     from nanogpt.optim.steps.momentum import Momentum
