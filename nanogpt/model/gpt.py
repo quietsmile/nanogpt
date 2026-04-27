@@ -369,7 +369,53 @@ class GPT(nn.Module):
             from nanogpt.optim import MultiOptimizer
             from nanogpt.optim.recipes import muon_megatron as _recipe_megatron
 
+            def _build_fused_lists(names, params):
+                """Discover Q/K/V triplets and gate/up pairs by name pattern.
+
+                Megatron uses fused linear_qkv and linear_fc1 (gate+up); nano
+                splits these. Muon's NS5 must see the fused tensor to match
+                Megatron's update geometry (Q/K/V mutually orthogonal rather
+                than each independently row-orthonormal).
+                """
+                idx = {n: i for i, n in enumerate(names)}
+                groups = []
+                seen = set()
+                for n in names:
+                    for tag in ('.q_proj.weight', '.k_proj.weight', '.v_proj.weight'):
+                        if n.endswith(tag):
+                            prefix = n[: -len(tag)]
+                            if prefix in seen:
+                                continue
+                            seen.add(prefix)
+                            triplet = [
+                                f'{prefix}.q_proj.weight',
+                                f'{prefix}.k_proj.weight',
+                                f'{prefix}.v_proj.weight',
+                            ]
+                            if all(t in idx for t in triplet):
+                                groups.append([params[idx[t]] for t in triplet])
+                for n in names:
+                    if n.endswith('.gate_proj.weight'):
+                        prefix = n[: -len('.gate_proj.weight')]
+                        partner = f'{prefix}.up_proj.weight'
+                        if partner in idx:
+                            groups.append([params[idx[n]], params[idx[partner]]])
+                for n in names:
+                    if n.endswith('.gate_weight'):
+                        prefix = n[: -len('.gate_weight')]
+                        partner = f'{prefix}.up_weight'
+                        if partner in idx:
+                            groups.append([params[idx[n]], params[idx[partner]]])
+                return groups
+
             def Muon(params, lr, momentum_beta, weight_decay, **kw):
+                fused_lists = (
+                    _build_fused_lists(muon_names, params)
+                    if kw.get('fuse_attn_qkv', True) else None
+                )
+                if fused_lists:
+                    print(f"  Muon fused groups: {len(fused_lists)} "
+                          f"(QKV/gate+up — matches Megatron linear_qkv/linear_fc1)")
                 return _NewMuon(
                     params,
                     pipeline=_recipe_megatron(
@@ -382,6 +428,7 @@ class GPT(nn.Module):
                     ),
                     lr=lr,
                     weight_decay=weight_decay,
+                    fused_param_lists=fused_lists,
                 )
         else:
             raise ValueError(f"unknown muon_impl {muon_impl!r} "
