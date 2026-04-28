@@ -163,6 +163,9 @@ HTML_TEMPLATE = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>nanogpt v2.0.0 fleet vs Megatron ref · MoE-196</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
