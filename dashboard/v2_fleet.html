@@ -323,12 +323,20 @@ Plotly.newPlot('plot-moe', moeTraces, {
 }, {displayModeBar:false, responsive:true});
 
 // ---------- Muon panels ----------
-const MUON_LBL = {nano_muon:'nano Muon (megatron port)', nano_muon_normuon:'nano NorMuon variant',
+const MUON_LBL = {nano_muon:'nano Muon v1.0 (resume from meg-iter500)',
+                  nano_muon_normuon:'nano NorMuon variant',
+                  v2_muon_lr1x_s1337:'v2 Muon LR1× s1337 (scratch)',
+                  v2_muon_lr1x_s42:'v2 Muon LR1× s42 (scratch)',
+                  v2_muon_lr1x_s7:'v2 Muon LR1× s7 (scratch)',
+                  v2_muon_buggy_33x:'v2 Muon 33× BUGGY (scratch, +0.2 nat)',
                   meg_muon_base:'Megatron Muon (ef3.0 base)',
                   meg_muon_noise1:'Megatron noise1', meg_muon_noise2:'Megatron noise2',
                   meg_muon_noise3:'Megatron noise3', meg_muon_noise4:'Megatron noise4',
                   meg_muon_noise5:'Megatron noise5'};
 const MUON_COLORS = {nano_muon:'#7ee787', nano_muon_normuon:'#ff7b72',
+                     v2_muon_lr1x_s1337:'#7ee787', v2_muon_lr1x_s42:'#79c0ff',
+                     v2_muon_lr1x_s7:'#ffa657',
+                     v2_muon_buggy_33x:'#f85149',
                      meg_muon_base:'#bc8cff'};
 const MUON_GRAY = '#6e7681';
 
@@ -361,12 +369,16 @@ for (const n of ['meg_muon_noise1','meg_muon_noise2','meg_muon_noise3','meg_muon
   });
 }
 muonTraces[muonTraces.length] = muonTraces[0] && {...muonTraces[0], name:'Megatron Muon 5-seed', showlegend: true};
-for (const n of ['nano_muon','nano_muon_normuon']) {
+// nano runs — v2 LR1X 3-seed fleet (matched), buggy 33x (before-fix), v1.0 nano-Muon resume, NorMuon variant
+const muonNanoOrder = ['v2_muon_lr1x_s1337','v2_muon_lr1x_s42','v2_muon_lr1x_s7',
+                       'v2_muon_buggy_33x','nano_muon','nano_muon_normuon'];
+for (const n of muonNanoOrder) {
   if (!DATA[n]) continue;
   muonTraces.push({
     x: DATA[n].map(r=>r.iter), y: ema(DATA[n].map(r=>r.loss), 0.05),
     name: MUON_LBL[n], type:'scatter', mode:'lines',
-    line:{color: MUON_COLORS[n], width: 2},
+    line:{color: MUON_COLORS[n], width: 2,
+          dash: n === 'v2_muon_buggy_33x' ? 'dash' : 'solid'},
   });
 }
 Plotly.newPlot('plot-muon-loss', muonTraces, {
